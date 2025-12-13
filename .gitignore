@@ -1,0 +1,5 @@
+node_modules/
+rasp_wav_player/node_modules/
+logs/
+*.log
+npm-debug.log*

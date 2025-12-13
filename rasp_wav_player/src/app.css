@@ -1,0 +1,430 @@
+@import "@picocss/pico/css/pico.min.css";
+
+:root {
+  --card-bg: #1b1b1b;
+  --card-radius: 1.2rem;
+  --gap: 1rem;
+}
+
+/* Hauptcontainer */
+main {
+  padding: 1rem;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+  margin: 0 auto;
+}
+
+/* Player-Karte */
+.player-card {
+  background: var(--card-bg);
+  padding: 1.5rem;
+  border-radius: var(--card-radius);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+
+  font-size: 0.9rem;
+
+  width: 230px;      /* Zielgröße */
+  height: 420px;     /* fixe Höhe für 480px-Displays */
+  flex: 0 0 auto;    /* verhindert Flex-Stretching */
+
+  padding-bottom: 0;
+  margin-bottom: 0;
+}
+
+/* Titel der Card (Default) */
+.player-card h2 {
+  margin-bottom: 0.25rem;
+  font-size: 1rem;
+}
+
+/* Ausnahme: erste Karte = Player selbst → breiter */
+.player-layout > article:first-child {
+  width: 270px;
+}
+
+/* Header in Cards, z.B. Ordner */
+.player-card-header,
+.player-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 67px;        /* feste Höhe */
+  min-height: 67px;    /* falls Inhalt mal größer wäre */
+}
+
+/* Player-Titel mit Icon + Marquee-Logik */
+.player-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  font-size: 1rem;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.player-title-icon {
+  flex: 0 0 auto;
+}
+
+.player-title-text-wrapper {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* Kleine Variante, wenn es noch knapp passt */
+.player-title--small .player-title-text {
+  font-size: 0.9rem;
+}
+
+/* Marquee-Variante */
+.player-title--marquee .player-title-text {
+  display: inline-block;
+  animation: marquee 20s linear infinite;
+}
+
+@keyframes marquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-100%);
+  }
+}
+
+/* kleiner Icon-Button im Ordner-Header */
+.icon-button {
+  padding: 0.35rem 0.6rem;
+}
+
+/* Fehlermeldung Directory */
+.dir-error {
+  color: #fca5a5;
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+}
+
+/* Directory-Liste (flach) */
+.dir-list-container {
+  margin-top: 0.5rem;
+  max-height: 300px;
+  overflow: auto;
+  font-size: 0.8rem;
+}
+
+.dir-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.dir-item + .dir-item {
+  margin-top: 0.10rem; /* enger zusammen */
+}
+
+.dir-entry {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.1rem;
+  width: 100%;
+  min-width: 160px;         /* etwas breiter */
+  padding: 0.1rem 0.1rem;  /* etwas kompakter in der Höhe */
+  border-radius: 0.6rem;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 0.75rem;       /* kleinerer Text */
+  text-align: left;
+}
+
+.dir-entry:hover {
+  background: rgba(255,255,255,0.06);
+}
+
+/* Aktiver Ordner gut sichtbar */
+.dir-entry-active {
+  background: rgba(255,255,255,0.12);
+  font-weight: 600;
+  position: relative;
+}
+
+.dir-entry-active::before {
+  content: "";
+  position: absolute;
+  left: 0.15rem;
+  top: 15%;
+  bottom: 15%;
+  width: 3px;
+  border-radius: 999px;
+  background: linear-gradient(to bottom, #4ade80, #22d3ee);
+}
+
+.dir-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Placeholder-Text, wenn kein Ordner gewählt */
+.no-folder-text {
+  margin-top: 1rem;
+  opacity: 0.7;
+  font-size: 0.8rem;
+}
+
+/* große Buttons */
+.control-buttons {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.control-buttons button {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  font-size: 1.3rem;
+  padding: 0;
+}
+
+/* Zeitangabe unter dem Progress-Slider */
+.time {
+  display: flex;
+  justify-content: space-between;
+  margin: 0.5rem 0;
+  font-size: 0.8rem;
+}
+
+/* Slider besser nutzbar */
+input[type="range"] {
+  height: 28px;
+  margin-bottom: 0.05rem;
+}
+
+.volume-area {
+  margin-top: 1rem;
+  font-size: 0.85rem;
+}
+
+/* Playlist */
+.playlist {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.playlist-empty {
+  opacity: 0.7;
+}
+
+/* Scrollbarer Bereich der Playlist */
+.playlist-list {
+  max-height: 300px;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Liste */
+.playlist-item {
+  list-style: none !important;
+  padding: 0;
+  margin: 0;
+}
+
+.playlist-item + .playlist-item {
+  margin-top: 0.10rem; /* gleicher enger Abstand wie Ordner */
+}
+
+/* Einträge: gleicher Stil wie Ordner */
+.playlist-entry {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.2rem;
+  width: 99%;
+  min-width: 174px;
+  padding: 0.1rem 0.1rem;
+  border-radius: 0.6rem;
+  background: transparent;
+  font-size: 0.75rem;
+  cursor: pointer;
+  text-align: left;
+  margin-bottom: 5%;
+}
+
+.playlist-entry:hover {
+  background: rgba(255,255,255,0.06);
+}
+
+/* Aktiver Eintrag in der Playlist – deutlich hervorheben */
+.playlist-entry--active {
+  position: relative;
+  font-weight: 700;
+  background: radial-gradient(circle at 0% 50%, rgba(255, 0, 150, 0.35), rgba(255, 0, 150, 0.08));
+  box-shadow: 0 0 0.4rem rgba(255, 0, 150, 0.4);
+  transform: translateX(1px);
+}
+
+/* farbiger Balken links als "Now Playing"-Marker */
+.playlist-entry--active::before {
+  content: "";
+  position: absolute;
+  left: 0.12rem;
+  top: 15%;
+  bottom: 15%;
+  width: 3px;
+  border-radius: 999px;
+  background: linear-gradient(to bottom, #ff4bba, #ffdd55);
+}
+
+/* Text im aktiven Eintrag minimal größer und besser lesbar */
+.playlist-entry--active .playlist-entry-name {
+  font-size: 0.8rem;
+  letter-spacing: 0.01em;
+}
+
+/* Icon beim aktiven Track hervorheben */
+.playlist-entry--active .playlist-entry-icon {
+  scale: 1.05;
+  opacity: 0.95;
+}
+
+/* Hover auf aktivem Eintrag etwas dezenter, damit der Status nicht verwischt */
+.playlist-entry--active:hover {
+  background: radial-gradient(circle at 0% 50%, rgba(255, 0, 150, 0.45), rgba(255, 0, 150, 0.12));
+}
+
+.playlist-entry-icon {
+  flex-shrink: 0;
+}
+
+.playlist-entry-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playlist-entry:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.7);
+  outline-offset: 2px;
+}
+
+.playlist-entry--active:focus-visible {
+  outline: 2px solid #ffdd55;
+  outline-offset: 2px;
+}
+
+/* Gemeinsame Scrollbar-Styles für Playlist und Ordner */
+.playlist-list,
+.dir-list-container {
+  scrollbar-width: thin;                             /* Firefox */
+  scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
+  -webkit-overflow-scrolling: touch;                 /* iOS/Android smooth */
+  touch-action: pan-y;                               /* besseres Scroll-Verhalten */
+}
+
+/* WebKit / Blink (Chrome, Edge, Safari) */
+.playlist-list::-webkit-scrollbar,
+.dir-list-container::-webkit-scrollbar {
+  width: 6px;
+}
+
+.playlist-list::-webkit-scrollbar-track,
+.dir-list-container::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.playlist-list::-webkit-scrollbar-thumb,
+.dir-list-container::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.3);
+  border-radius: 999px;
+}
+
+/* Hauptlayout: Player links, andere Cards rechts */
+.player-layout {
+  display: flex;
+  gap: 1rem;
+  align-items: stretch;
+}
+
+/* 7" Display / kleine Screens: untereinander */
+@media (max-width: 768px) {
+  .player-layout {
+    flex-direction: column;
+  }
+
+  .volume-knob-panel {
+    align-items: center;
+  }
+}
+
+/* Volume-Knob-Panel (falls du RoundKnob nutzt) */
+.volume-knob-panel {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  border-radius: 1.2rem;
+  background: radial-gradient(circle at 10% 0%, #333, #111);
+  box-shadow: 0 8px 20px rgba(0,0,0,0.7);
+  min-width: 180px;
+}
+
+.volume-knob-panel h3 {
+  margin-bottom: 0.75rem;
+}
+
+.volume-value {
+  margin-top: 0.5rem;
+  font-size: 0.95rem;
+  opacity: 0.8;
+}
+
+.gpio-status {
+  font-size: 0.5rem;
+  opacity: 0.8;
+  margin-top: 2rem;
+}
+
+/* Topbar für den Close-Button */
+.app-topbar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin-bottom: 0.1rem;
+}
+
+/* X-Button oben rechts */
+.close-button {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 999px;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  margin-bottom: 0;
+}
+
+.close-button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.close-button:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.8);
+  outline-offset: 2px;
+}

@@ -1,0 +1,23 @@
+{
+  "name": "aosjs",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "prestart": "npm run build",
+    "build": "npm --prefix rasp_wav_player run build",
+    "build:ui": "npm --prefix rasp_wav_player run build",
+    "install:ui": "npm --prefix rasp_wav_player install",
+    "postinstall": "npm run install:ui",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "description": "",
+  "dependencies": {
+    "express": "^5.1.0",
+    "ws": "^8.18.0"
+  }
+}

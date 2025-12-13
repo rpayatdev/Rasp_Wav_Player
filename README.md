@@ -1,4 +1,4 @@
-# RaspberryPiMichael
+# Raspberry Pi WAV Player
 
 All pieces for the GPIO button listener, Node web server, and Svelte wav player live in this repository so a single sync/update is enough.
 

@@ -614,16 +614,18 @@
     }
 
     const trackName = currentTrack()?.name ?? "unbekannt";
+    const wasPaused = audioElement.paused;
 
-    // Wenn bereits gespielt wird, Status synchronisieren und kein Toggle auslÇÏsen
-    if (!audioElement.paused) {
-      isPlaying = true;
-      wsLog("info", "DOWN ignoriert: Track lÇäuft bereits", {
+    if (!wasPaused) {
+      lastPlayTrigger = "gpio";
+      lastPlayCallTs = receivedAt;
+      wsLog("info", "GPIO Pause angefordert", {
         track: trackName,
         position: Number.isFinite(audioElement.currentTime)
           ? audioElement.currentTime.toFixed(3)
           : "n/a",
       });
+      audioElement.pause();
       return;
     }
 
@@ -637,7 +639,7 @@
     togglePlay("gpio");
   };
 
-  // --- Titel / Marquee-Logik ---
+// --- Titel / Marquee-Logik ---
 
   let titleElement: HTMLElement | null = null;
   let titleState: "normal" | "small" | "marquee" = "normal";

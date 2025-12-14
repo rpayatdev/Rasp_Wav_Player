@@ -269,6 +269,7 @@
         const previousVolume = audioElement.volume;
         const previousMuted = audioElement.muted;
         const previousTime = audioElement.currentTime;
+        let restored = false;
 
         audioElement.preload = "auto";
         if (audioElement.src !== targetSrc) {
@@ -291,10 +292,23 @@
 
         audioElement.muted = previousMuted;
         audioElement.volume = previousVolume;
+        restored = true;
         lastPrimedUrl = targetSrc;
       } catch (err) {
         wsLog("warn", "Audio-Vorbereitung blockiert/fehlgeschlagen", err);
       } finally {
+        // Fallback-Restore, falls ein Fehler vor dem Zurücksetzen passierte
+        if (audioElement) {
+          try {
+            audioElement.muted = false;
+            if (Number.isFinite(volume)) {
+              audioElement.volume = volume;
+            }
+          } catch (_err) {
+            /* ignore */
+          }
+        }
+
         end = performance.now();
         isPriming = false;
         wsLog("info", "Prime beendet", {

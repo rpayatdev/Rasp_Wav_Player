@@ -5,6 +5,11 @@ set -u
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$REPO_DIR/logs"
 
+# Logging switches (set to 1 to enable, 0 to disable where supported)
+HTTP_LOG=0        # server.js HTTP request logging
+WS_VERBOSE=0      # verbose WS logs (server.js + button.py)
+UI_LOG_ENABLE=0   # accept /ui-log posts
+
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
@@ -13,10 +18,12 @@ mkdir -p "$LOG_DIR"
 cd "$REPO_DIR" || exit 1
 
 log "Starting GPIO listener..."
-python3 "$REPO_DIR/button.py" > "$LOG_DIR/button.log" 2>&1 &
+HTTP_LOG=$HTTP_LOG WS_VERBOSE=$WS_VERBOSE UI_LOG_ENABLE=$UI_LOG_ENABLE \
+  python3 "$REPO_DIR/button.py" > "$LOG_DIR/button.log" 2>&1 &
 
 log "Starting Node server..."
-npm start --prefix "$REPO_DIR" > "$LOG_DIR/aosjs.log" 2>&1 &
+HTTP_LOG=$HTTP_LOG WS_VERBOSE=$WS_VERBOSE UI_LOG_ENABLE=$UI_LOG_ENABLE \
+  npm start --prefix "$REPO_DIR" > "$LOG_DIR/aosjs.log" 2>&1 &
 
 # Warten bis der HTTP-Server bereit ist, bevor Chromium gestartet wird
 wait_for_http() {

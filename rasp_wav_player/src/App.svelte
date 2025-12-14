@@ -17,6 +17,8 @@
   let lastWsDownTs: number | null = null;
   let lastPlayCallTs: number | null = null;
   let lastPlayTrigger: "gpio" | "ui" | "other" | null = null;
+  let lastPrimedUrl: string | null = null;
+  let lastWsHandledTs = 0;
 
   // --- GPIO / WebSocket ---
   let ws: WebSocket | null = null;
@@ -72,6 +74,24 @@
 
   const currentTrack = (): Track | null =>
     tracks.length > 0 ? tracks[currentIndex] : null;
+
+  function hasBufferedAudio(): boolean {
+    if (!audioElement) return false;
+    try {
+      const buf = audioElement.buffered;
+      if (!buf || buf.length === 0) return false;
+      const end = buf.end(buf.length - 1);
+      return Number.isFinite(end) && end > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  function isReadyForInstantPlay(): boolean {
+    if (!audioElement) return false;
+    // HAVE_ENOUGH_DATA = 4, HAVE_FUTURE_DATA = 3; beide sind ausreichend
+    return audioElement.readyState >= 3 || hasBufferedAudio();
+  }
 
   function formatTime(sec: number): string {
     if (!isFinite(sec)) return "00:00";
@@ -213,6 +233,9 @@
       return null;
     }
 
+    const track = currentTrack();
+    if (!track) return null;
+
     if (primePromise) return primePromise;
 
     // Nicht während laufender Wiedergabe primen, sonst droppen wir kurz den Ton.
@@ -221,8 +244,22 @@
       return null;
     }
 
+    const targetSrc = track.url;
+    if (audioElement.src !== targetSrc) {
+      audioElement.src = targetSrc;
+    }
+
+    if (audioElement.readyState >= 3 && hasBufferedAudio()) {
+      lastPrimedUrl = targetSrc;
+      wsLog("info", "Prime übersprungen: Puffer bereits bereit", {
+        track: track.name,
+        readyState: audioElement.readyState,
+      });
+      return performance.now();
+    }
+
     primePromise = (async () => {
-      const trackName = currentTrack()?.name ?? "unbekannt";
+      const trackName = track.name ?? "unbekannt";
       const start = performance.now();
       let end: number | null = null;
       wsLog("info", "Prime gestartet", { track: trackName, startMs: start.toFixed(1) });
@@ -234,7 +271,12 @@
         const previousTime = audioElement.currentTime;
 
         audioElement.preload = "auto";
-        audioElement.load();
+        if (audioElement.src !== targetSrc) {
+          audioElement.src = targetSrc;
+        }
+        if (audioElement.readyState < 3) {
+          audioElement.load();
+        }
 
         // Kurz anspielen zum Decoden, danach wieder stoppen.
         audioElement.muted = true;
@@ -249,6 +291,7 @@
 
         audioElement.muted = previousMuted;
         audioElement.volume = previousVolume;
+        lastPrimedUrl = targetSrc;
       } catch (err) {
         wsLog("warn", "Audio-Vorbereitung blockiert/fehlgeschlagen", err);
       } finally {
@@ -494,11 +537,9 @@
     audioElement.pause();
     isPlaying = false;
 
-    setTimeout(() => {
-      if (!audioElement || tracks.length === 0) return;
-      audioElement.volume = volume;
-      void primeCurrentTrack();
-    }, 0);
+    if (!audioElement || tracks.length === 0) return;
+    audioElement.volume = volume;
+    void primeCurrentTrack();
   }
 
   function selectTrack(index: number): void {
@@ -525,11 +566,10 @@
     duration = 0;
 
     // Neuen Track laden, aber NICHT autoplayen
-    setTimeout(() => {
-      if (!audioElement || !currentTrack()) return;
+    if (audioElement && currentTrack()) {
       audioElement.volume = volume;
       void primeCurrentTrack();
-    }, 0);
+    }
   }
 
   // Navigation: zurück (Wrap-Around)
@@ -603,6 +643,15 @@
 
     if (msg !== "DOWN") return;
 
+    const nowTs = performance.now();
+    if (nowTs - lastWsHandledTs < 100) {
+      wsLog("warn", "DOWN gedrosselt (zu schnell hintereinander)", {
+        deltaMs: (nowTs - lastWsHandledTs).toFixed(1),
+      });
+      return;
+    }
+    lastWsHandledTs = nowTs;
+
     if (!audioElement) {
       wsLog("warn", "DOWN ignoriert: Audioelement noch nicht bereit");
       return;
@@ -626,6 +675,12 @@
           : "n/a",
       });
       audioElement.pause();
+      return;
+    }
+
+    if (isReadyForInstantPlay()) {
+      wsLog("info", "GPIO play sofort (Media bereit)", { track: trackName });
+      togglePlay("gpio");
       return;
     }
 

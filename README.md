@@ -7,7 +7,7 @@ All pieces for the GPIO button listener, Node web server, and Svelte wav player 
 - `server.js`: serves the built UI from `rasp_wav_player/dist` and proxies WebSocket traffic to `PI_WS_URL` (default `ws://127.0.0.1:8080`); also receives UI console logs at `/ui-log`.
 - `rasp_wav_player/`: Svelte UI; `npm run build` produces the `dist` folder the server serves.
 - `aos_setup.sh`: update/install/build helper; only installs/builds when `git pull` actually updates the repo.
-- `aos.sh`: runtime launcher for the Pi; starts `button.py`, starts the Node server, waits for it to come up, then launches Chromium in kiosk mode to `http://localhost:4173`.
+- `aos.sh`: runtime launcher for the Pi; starts `button.py`, starts the Node server, waits for it to come up, then launches Chromium in kiosk mode to `http://localhost:4173`. Contains simple switches to reduce logging noise.
 - `logs/`: created automatically; runtime logs land here.
 
 ## Prerequisites (on the Pi)
@@ -44,9 +44,14 @@ This will:
 
 ### Logging
 - Backend/server: `logs/aosjs.log`
-- Frontend console (from the kiosk UI): `logs/ui.log` (sent via `/ui-log`)
+- Frontend console (from the kiosk UI): `logs/ui.log` (sent via `/ui-log`; can be disabled via `UI_LOG_ENABLE=0` in `aos.sh`)
 - GPIO listener: `logs/button.log`
 - Chromium process/stdout: `logs/chromium.log`
+
+`aos.sh` logging switches (edit near the top):
+- `HTTP_LOG` (0/1): toggle HTTP request logging in `server.js`
+- `WS_VERBOSE` (0/1): toggle verbose per-message WS logs in `server.js` and `button.py`
+- `UI_LOG_ENABLE` (0/1): toggle accepting UI console logs on `/ui-log`
 
 ## Manual development commands
 - Install deps: `npm install`

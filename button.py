@@ -1,13 +1,16 @@
 import asyncio
 import lgpio
+import os
 import signal
 import subprocess
 import time
 
 BUTTON_PIN = 27
 
-POLL_INTERVAL = 0.001   # 1ms
-DEBOUNCE_TIME = 0.03    # 30ms  <-- this alone adds 30ms latency minimum
+# Tunables (edit here or via environment variables)
+POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "0.001"))  # seconds (1 ms)
+DEBOUNCE_TIME = float(os.environ.get("DEBOUNCE_TIME", "0.03"))   # seconds (30 ms)
+WS_VERBOSE = os.environ.get("WS_VERBOSE", "0") == "1"            # log every send
 
 chip = lgpio.gpiochip_open(0)
 lgpio.gpio_claim_input(chip, BUTTON_PIN, lgpio.SET_PULL_UP)
@@ -35,10 +38,12 @@ def log(msg: str):
 async def send_safe(ws, msg: str):
     start_ns = time.monotonic_ns()
     try:
-        log(f"WS SEND start -> {msg}")
+        if WS_VERBOSE:
+            log(f"WS SEND start -> {msg}")
         await ws.send(msg)
         dur_ms = (time.monotonic_ns() - start_ns) / 1_000_000.0
-        log(f"WS SEND done  -> {msg} (dur_ms={dur_ms:.3f})")
+        if WS_VERBOSE:
+            log(f"WS SEND done  -> {msg} (dur_ms={dur_ms:.3f})")
     except Exception as e:
         dur_ms = (time.monotonic_ns() - start_ns) / 1_000_000.0
         log(f"WS SEND fail  -> {msg} (dur_ms={dur_ms:.3f}) err={repr(e)}; removing client")
@@ -124,7 +129,15 @@ async def main():
                 clients.remove(websocket)
             log(f"WS client disconnected: {addr} (clients={len(clients)})")
 
-    server = await websockets.serve(ws_handler, "0.0.0.0", 8080)
+    server = await websockets.serve(
+        ws_handler,
+        "0.0.0.0",
+        8080,
+        compression=None,   # no per-message deflate to cut latency
+        max_queue=1,        # drop backlog quickly
+        ping_interval=20,
+        ping_timeout=20,
+    )
     log("WebSocket Server gestartet auf 0.0.0.0:8080")
 
     btn_task = asyncio.create_task(button_task())

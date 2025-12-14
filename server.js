@@ -9,6 +9,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const LOG_DIR = path.join(__dirname, "logs");
 const UI_LOG_FILE = path.join(LOG_DIR, "ui.log");
+const WS_VERBOSE = process.env.WS_VERBOSE === "1"; // trace every WS message
+const HTTP_LOG = process.env.HTTP_LOG !== "0"; // disable by setting 0
+const UI_LOG_ENABLE = process.env.UI_LOG_ENABLE !== "0"; // disable by setting 0
 
 // Force UTF-8 for text responses
 const ensureUtf8 = (value) => {
@@ -59,15 +62,17 @@ function log(msg) {
 }
 
 // ---- HTTP logging ----
-app.use((req, res, next) => {
-  const start = process.hrtime.bigint();
-  log(`HTTP -> ${req.method} ${req.url}`);
-  res.on("finish", () => {
-    const durMs = Number((process.hrtime.bigint() - start) / 1000000n);
-    log(`HTTP <- ${req.method} ${req.url} ${res.statusCode} (dur_ms=${durMs})`);
+if (HTTP_LOG) {
+  app.use((req, res, next) => {
+    const start = process.hrtime.bigint();
+    log(`HTTP -> ${req.method} ${req.url}`);
+    res.on("finish", () => {
+      const durMs = Number((process.hrtime.bigint() - start) / 1000000n);
+      log(`HTTP <- ${req.method} ${req.url} ${res.statusCode} (dur_ms=${durMs})`);
+    });
+    next();
   });
-  next();
-});
+}
 
 if (!fs.existsSync(DIST_DIR)) {
   log(
@@ -95,6 +100,10 @@ app.get(/.*/, (req, res) => {
 
 // ---- UI console log sink ----
 app.post("/ui-log", (req, res) => {
+  if (!UI_LOG_ENABLE) {
+    return res.sendStatus(204);
+  }
+
   const { level = "info", message = "", ts: clientTs } = req.body || {};
   const line = `[${new Date().toISOString()}] [${req.ip}] [${level}] ${String(
     clientTs ?? "",
@@ -115,12 +124,16 @@ const server = http.createServer(app);
 // Example: PI_WS_URL=ws://raspberrypi.local:8080
 const PI_WS_URL = process.env.PI_WS_URL || "ws://127.0.0.1:8080";
 
-const wss = new WebSocketServer({ server, path: "/ws" });
+const wss = new WebSocketServer({
+  server,
+  path: "/ws",
+  perMessageDeflate: false,
+});
 
 wss.on("connection", (clientWs, req) => {
   log(`WS(client) connected from ${req.socket.remoteAddress}`);
 
-  const upstream = new WebSocket(PI_WS_URL);
+  const upstream = new WebSocket(PI_WS_URL, { perMessageDeflate: false });
 
   upstream.on("open", () => {
     log(`WS(upstream) connected -> ${PI_WS_URL}`);
@@ -128,10 +141,10 @@ wss.on("connection", (clientWs, req) => {
 
   upstream.on("message", (data) => {
     const msg = data.toString();
-    log(`WS RECV <- upstream: ${msg}`);
+    if (WS_VERBOSE) log(`WS RECV <- upstream: ${msg}`);
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(msg);
-      log(`WS SEND -> client: ${msg}`);
+      if (WS_VERBOSE) log(`WS SEND -> client: ${msg}`);
     }
   });
 
@@ -147,10 +160,10 @@ wss.on("connection", (clientWs, req) => {
 
   clientWs.on("message", (data) => {
     const msg = data.toString();
-    log(`WS RECV <- client: ${msg}`);
+    if (WS_VERBOSE) log(`WS RECV <- client: ${msg}`);
     if (upstream.readyState === WebSocket.OPEN) {
       upstream.send(msg);
-      log(`WS SEND -> upstream: ${msg}`);
+      if (WS_VERBOSE) log(`WS SEND -> upstream: ${msg}`);
     } else {
       log(`WS DROP -> upstream not open (state=${upstream.readyState}) msg=${msg}`);
     }

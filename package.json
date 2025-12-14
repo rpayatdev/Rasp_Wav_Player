@@ -4,7 +4,6 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "prestart": "npm run build",
     "build": "npm --prefix rasp_wav_player run build",
     "build:ui": "npm --prefix rasp_wav_player run build",
     "install:ui": "npm --prefix rasp_wav_player install",

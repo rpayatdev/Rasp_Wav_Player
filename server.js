@@ -7,10 +7,22 @@ import { WebSocketServer, WebSocket } from "ws";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const LOG_DIR = path.join(__dirname, "logs");
+const UI_LOG_FILE = path.join(LOG_DIR, "ui.log");
 
 const app = express();
 const PORT = 4173;
 const DIST_DIR = path.join(__dirname, "rasp_wav_player", "dist");
+
+// ensure log directory exists
+try {
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+} catch (err) {
+  console.error("Failed to create log dir", err);
+}
+
+// accept JSON for UI log endpoint
+app.use(express.json({ limit: "200kb" }));
 
 // ---- timestamp helpers ----
 const t0 = process.hrtime.bigint();
@@ -40,10 +52,36 @@ if (!fs.existsSync(DIST_DIR)) {
   );
 }
 
-app.use(express.static(DIST_DIR));
+app.use(
+  express.static(DIST_DIR, {
+    setHeaders(res, filePath) {
+      if (/\.(html|js|css|json|svg|txt|map)$/i.test(filePath)) {
+        const type = res.getHeader("Content-Type");
+        if (type && !String(type).toLowerCase().includes("charset")) {
+          res.setHeader("Content-Type", `${type}; charset=utf-8`);
+        }
+      }
+    },
+  }),
+);
 
 app.get(/.*/, (req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.sendFile(path.join(DIST_DIR, "index.html"));
+});
+
+// ---- UI console log sink ----
+app.post("/ui-log", (req, res) => {
+  const { level = "info", message = "", ts: clientTs } = req.body || {};
+  const line = `[${new Date().toISOString()}] [${req.ip}] [${level}] ${String(
+    clientTs ?? "",
+  )} ${String(message)}\n`;
+
+  fs.appendFile(UI_LOG_FILE, line, (err) => {
+    if (err) log(`UI log append error: ${err.message}`);
+  });
+
+  res.sendStatus(204);
 });
 
 // Create one server for both HTTP + WS

@@ -46,6 +46,12 @@ else
 fi
 
 log "Launching Chromium kiosk..."
-chromium --kiosk "http://localhost:4173" --password-store=basic > "$LOG_DIR/chromium.log" 2>&1 &
+chromium \
+  --kiosk "http://localhost:4173" \
+  --password-store=basic \
+  --lang=de-DE \
+  --enable-logging=stderr \
+  --v=0 \
+  > "$LOG_DIR/chromium.log" 2>&1 &
 
 exit 0

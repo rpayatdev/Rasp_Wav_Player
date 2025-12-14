@@ -10,6 +10,17 @@ const __dirname = path.dirname(__filename);
 const LOG_DIR = path.join(__dirname, "logs");
 const UI_LOG_FILE = path.join(LOG_DIR, "ui.log");
 
+// Force UTF-8 for text responses
+const ensureUtf8 = (value) => {
+  const type = String(value || "");
+  if (!type) return value;
+  if (/charset=/i.test(type)) return value;
+  if (/^(text\/|application\/(json|javascript|xml|svg|rss|atom))/i.test(type)) {
+    return `${type}; charset=utf-8`;
+  }
+  return value;
+};
+
 const app = express();
 const PORT = 4173;
 const DIST_DIR = path.join(__dirname, "rasp_wav_player", "dist");
@@ -20,6 +31,18 @@ try {
 } catch (err) {
   console.error("Failed to create log dir", err);
 }
+
+// Middleware: enforce UTF-8 charset on known text responses
+app.use((req, res, next) => {
+  const origSetHeader = res.setHeader.bind(res);
+  res.setHeader = (name, value) => {
+    if (String(name).toLowerCase() === "content-type") {
+      value = ensureUtf8(value);
+    }
+    return origSetHeader(name, value);
+  };
+  next();
+});
 
 // accept JSON for UI log endpoint
 app.use(express.json({ limit: "200kb" }));

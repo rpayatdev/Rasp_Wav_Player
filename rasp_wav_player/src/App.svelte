@@ -1,4 +1,4 @@
-﻿<script lang="ts">
+<script lang="ts">
   import { onMount, tick } from "svelte";
   import DirView, { type DirNode } from "./lib/DirView.svelte";
 

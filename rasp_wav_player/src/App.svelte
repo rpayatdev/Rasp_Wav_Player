@@ -51,14 +51,14 @@
     }
   }
 
-  // aktuell sichtbare Playlist (immer nur der gewÃ¤hlte Ordner)
+  // aktuell sichtbare Playlist (immer nur der gewählte Ordner)
   let tracks: Track[] = [];
   let currentIndex = 0;
 
   // Directory / FS-Handling
   let rootDirHandle: FileSystemDirectoryHandle | null = null;
-  let rootDirName = ""; // Name des Ursprungsordners (fÃ¼r Anzeige + Tooltip)
-  let directoryTree: DirNode | null = null; // intern fÃ¼r Flatten
+  let rootDirName = ""; // Name des Ursprungsordners (für Anzeige + Tooltip)
+  let directoryTree: DirNode | null = null; // intern für Flatten
   let directories: DirNode[] = []; // flache Liste aller Ordner (Full-Path relativ zum Root)
   let selectedDirPath: string | null = null;
 
@@ -67,7 +67,7 @@
 
   let objectUrls: string[] = [];
 
-  // Scroll-Ref fÃ¼r Playlist
+  // Scroll-Ref für Playlist
   let playlistScrollContainer: HTMLDivElement | null = null;
 
   const currentTrack = (): Track | null =>
@@ -105,7 +105,7 @@
         playPromise
           .then(() => {
             const resolvedAt = performance.now();
-            wsLog("info", "Play-Promise erfÃ¼llt", {
+            wsLog("info", "Play-Promise erfüllt", {
               source,
               track: currentTrack()?.name ?? "unbekannt",
               dtMs: (resolvedAt - now).toFixed(1),
@@ -209,15 +209,15 @@
 
   async function primeCurrentTrack(): Promise<number | null> {
     if (!audioElement || tracks.length === 0) {
-      wsLog("warn", "Prime Ã¼bersprungen: Kein Audioelement/keine Tracks");
+      wsLog("warn", "Prime übersprungen: Kein Audioelement/keine Tracks");
       return null;
     }
 
     if (primePromise) return primePromise;
 
-    // Nicht wÃ¤hrend laufender Wiedergabe primen, sonst droppen wir kurz den Ton.
+    // Nicht während laufender Wiedergabe primen, sonst droppen wir kurz den Ton.
     if (!audioElement.paused) {
-      wsLog("info", "Prime Ã¼bersprungen: Bereits in Wiedergabe");
+      wsLog("info", "Prime übersprungen: Bereits in Wiedergabe");
       return null;
     }
 
@@ -273,7 +273,7 @@
 
     if (!("showDirectoryPicker" in window)) {
       dirError =
-        "Dein Browser unterstÃ¼tzt die File System Access API nicht. Bitte aktuellen Chrome oder Edge verwenden.";
+        "Dein Browser unterstützt die File System Access API nicht. Bitte aktuellen Chrome oder Edge verwenden.";
       return;
     }
 
@@ -302,7 +302,7 @@
         if (directoryTree) {
           directories = flattenDirectories(directoryTree);
 
-          // initial: immer Root (path === "") wÃ¤hlen, falls vorhanden
+          // initial: immer Root (path === "") wählen, falls vorhanden
           if (directories.length > 0) {
             selectDirectory(directories[0].path);
           }
@@ -320,7 +320,7 @@
   // Dir-Baum rekursiv aufbauen, Pfade RELATIV zum Root
   async function buildDirectoryTree(
     dirHandle: FileSystemDirectoryHandle,
-    basePath: string, // "" fÃ¼r Root, "sub", "sub/inner", ...
+    basePath: string, // "" für Root, "sub", "sub/inner", ...
   ): Promise<DirNode> {
     const dirName =
       basePath === ""
@@ -385,7 +385,7 @@
     return result;
   }
 
-  // Scroll-Helfer fÃ¼r Playlist
+  // Scroll-Helfer für Playlist
   async function scrollPlaylistToTop() {
     await tick();
     if (playlistScrollContainer) {
@@ -413,7 +413,7 @@
     }
   }
 
-  // Dateiname ohne Ordner fÃ¼r Playlist-Anzeige
+  // Dateiname ohne Ordner für Playlist-Anzeige
   function getTrackDisplayName(track: Track): string {
     const parts = track.name.split("/");
     return parts[parts.length - 1] || track.name;
@@ -427,7 +427,7 @@
     return track.name;
   }
 
-  // Nummerische Sortierung vor alphabetischer, mit natÃ¼rlicher Zahlenerkennung
+  // Nummerische Sortierung vor alphabetischer, mit natürlicher Zahlenerkennung
   function tokenizeNatural(name: string): Array<string | number> {
     return name
       .split(/(\d+)/)
@@ -471,7 +471,7 @@
     return 0;
   }
 
-  // Ordner auswÃ¤hlen: Playlist = WAVs aus diesem Ordner (nicht rekursiv)
+  // Ordner auswählen: Playlist = WAVs aus diesem Ordner (nicht rekursiv)
   function selectDirectory(path: string): void {
     if (!directoryTree || directories.length === 0) return;
 
@@ -532,7 +532,7 @@
     }, 0);
   }
 
-  // Navigation: zurÃ¼ck (Wrap-Around)
+  // Navigation: zurück (Wrap-Around)
   function goPrevTrack(): void {
     if (tracks.length === 0) return;
     const prevIndex = currentIndex === 0 ? tracks.length - 1 : currentIndex - 1;
@@ -546,7 +546,7 @@
     }
   }
 
-  // Navigation: vorwÃ¤rts mit Wrap-Around
+  // Navigation: vorwärts mit Wrap-Around
   function goNextTrack(): void {
     if (tracks.length === 0) return;
     const wasAtEnd = currentIndex === tracks.length - 1;
@@ -665,7 +665,7 @@
     titleState = "marquee";
   }
 
-  // Recalc, wenn Tracks oder Index sich Ã¤ndern
+  // Recalc, wenn Tracks oder Index sich ändern
   $: if (titleElement) {
     tracks;
     currentIndex;
@@ -761,7 +761,7 @@
               {#if tracks.length > 0}
                 {getTrackDisplayName(tracks[currentIndex])}
               {:else}
-                Kein Track gewÃ¤hlt
+                Kein Track gewählt
               {/if}
             </span>
           </span>
@@ -863,7 +863,7 @@
           />
         </div>
       {:else}
-        <p class="no-folder-text">Noch kein Ordner gewÃ¤hlt.</p>
+        <p class="no-folder-text">Noch kein Ordner gewählt.</p>
       {/if}
     </article>
 
@@ -876,7 +876,7 @@
       <section class="playlist">
         {#if tracks.length === 0}
           <p class="playlist-empty">
-            Keine .wav-Dateien im gewÃ¤hlten Ordner gefunden.
+            Keine .wav-Dateien im gewählten Ordner gefunden.
           </p>
         {:else}
           <div class="playlist-list" bind:this={playlistScrollContainer}>

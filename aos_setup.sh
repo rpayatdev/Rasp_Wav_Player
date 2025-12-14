@@ -13,8 +13,16 @@ mkdir -p "$LOG_DIR"
 cd "$REPO_DIR" || exit 1
 
 log "Updating repository (git pull --rebase)..."
+HEAD_BEFORE="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
 if ! git -C "$REPO_DIR" pull --rebase --autostash; then
-  log "Git pull skipped/failed (offline or local changes). Continuing with current files."
+  log "Git pull failed or skipped (offline or local changes). No further steps executed."
+  exit 0
+fi
+HEAD_AFTER="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+
+if [ "$HEAD_BEFORE" = "$HEAD_AFTER" ]; then
+  log "Repository already up to date. Skipping install/build."
+  exit 0
 fi
 
 log "Installing server/UI dependencies..."

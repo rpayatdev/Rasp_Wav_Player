@@ -613,11 +613,25 @@
       return;
     }
 
+    const trackName = currentTrack()?.name ?? "unbekannt";
+
+    // Wenn bereits gespielt wird, Status synchronisieren und kein Toggle auslÇÏsen
+    if (!audioElement.paused) {
+      isPlaying = true;
+      wsLog("info", "DOWN ignoriert: Track lÇäuft bereits", {
+        track: trackName,
+        position: Number.isFinite(audioElement.currentTime)
+          ? audioElement.currentTime.toFixed(3)
+          : "n/a",
+      });
+      return;
+    }
+
     const primeEnd = await primeCurrentTrack();
     const readyMs = primeEnd ?? performance.now();
     wsLog("info", "GPIO bereit zum Abspielen", {
       elapsedMs: (readyMs - receivedAt).toFixed(1),
-      track: currentTrack()?.name ?? "unbekannt",
+      track: trackName,
     });
 
     togglePlay("gpio");

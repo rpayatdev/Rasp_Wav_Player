@@ -19,6 +19,7 @@
   let lastPlayCallTs: number | null = null;
   let lastPlayTrigger: "gpio" | "ui" | "other" | null = null;
   let lastWsHandledTs = 0;
+  let lastWsDownSeq: number | null = null;
   let isPreloadingDir = false;
   let preloadProgressCount = 0;
   let preloadTotalCount = 0;
@@ -619,20 +620,44 @@
     const msg =
       typeof event.data === "string" ? event.data.trim() : String(event.data);
 
+    let downSeq: number | null = null;
+    if (msg === "DOWN") {
+      downSeq = null;
+    } else if (msg.startsWith("DOWN:")) {
+      const rawSeq = msg.slice("DOWN:".length).trim();
+      const parsedSeq = Number(rawSeq);
+      if (!Number.isInteger(parsedSeq) || parsedSeq <= 0) {
+        wsLog("warn", "DOWN mit ungÃ¼ltiger Sequenz ignoriert", { rawSeq, msg });
+        return;
+      }
+      downSeq = parsedSeq;
+    } else {
+      return;
+    }
+
     const receivedAt = performance.now();
     lastWsDownTs = receivedAt;
     wsLog("info", `Nachricht empfangen: ${msg}`, {
       receivedMs: receivedAt.toFixed(1),
+      seq: downSeq ?? undefined,
     });
 
-    if (msg !== "DOWN") return;
-
     const nowTs = performance.now();
-    if (nowTs - lastWsHandledTs < 100) {
+    if (downSeq !== null && downSeq === lastWsDownSeq) {
+      wsLog("warn", "DOWN mit doppelter Sequenz ignoriert", { seq: downSeq });
+      return;
+    }
+
+    // Legacy plain DOWN keeps the existing 100ms anti-double-trigger throttle.
+    if (downSeq === null && nowTs - lastWsHandledTs < 100) {
       wsLog("warn", "DOWN gedrosselt (zu schnell hintereinander)", {
         deltaMs: (nowTs - lastWsHandledTs).toFixed(1),
       });
       return;
+    }
+
+    if (downSeq !== null) {
+      lastWsDownSeq = downSeq;
     }
     lastWsHandledTs = nowTs;
 

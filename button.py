@@ -9,8 +9,10 @@ BUTTON_PIN = 27
 
 # Tunables (edit here or via environment variables)
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "0.001"))  # seconds (1 ms)
-DEBOUNCE_TIME = float(os.environ.get("DEBOUNCE_TIME", "0.03"))   # seconds (30 ms)
+DEBOUNCE_TIME = float(os.environ.get("DEBOUNCE_TIME", "0.012"))  # seconds (12 ms)
 WS_VERBOSE = os.environ.get("WS_VERBOSE", "0") == "1"            # log every send
+# GPIO edge logs are off by default to reduce hot-path overhead.
+GPIO_VERBOSE = os.environ.get("GPIO_VERBOSE", "1" if WS_VERBOSE else "0") == "1"
 
 chip = lgpio.gpiochip_open(0)
 lgpio.gpio_claim_input(chip, BUTTON_PIN, lgpio.SET_PULL_UP)
@@ -59,6 +61,7 @@ async def button_task():
     raw_value = lgpio.gpio_read(chip, BUTTON_PIN)
     stable_value = raw_value
     last_change_time = loop.time()
+    press_seq = 0
 
     log(f"Button task gestartet. Initial raw={raw_value} stable={stable_value} (PULL_UP: press=0, release=1)")
 
@@ -70,7 +73,8 @@ async def button_task():
         if value != raw_value:
             raw_value = value
             last_change_time = now
-            log(f"GPIO raw change -> raw={raw_value} (debouncing...)")
+            if GPIO_VERBOSE:
+                log(f"GPIO raw change -> raw={raw_value} (debouncing...)")
         else:
             # stable edge after debounce time
             if value != stable_value and (now - last_change_time) >= DEBOUNCE_TIME:
@@ -78,24 +82,29 @@ async def button_task():
                 stable_value = value
 
                 edge = f"{prev}->{stable_value}"
-                log(f"GPIO debounced edge -> {edge}")
+                if GPIO_VERBOSE:
+                    log(f"GPIO debounced edge -> {edge}")
 
                 # With SET_PULL_UP: 1 means not pressed, 0 means pressed
                 # PRESS start = falling edge 1 -> 0
                 if prev == 1 and stable_value == 0:
-                    log("BUTTON PRESS (start) -> sende DOWN")
+                    press_seq += 1
+                    msg = f"DOWN:{press_seq}"
+                    if GPIO_VERBOSE:
+                        log(f"BUTTON PRESS (start) -> sende {msg}")
                     if clients:
-                        msg = "DOWN"
                         await asyncio.gather(
                             *[send_safe(ws, msg) for ws in list(clients)],
                             return_exceptions=True
                         )
                     else:
-                        log("No WS clients connected; skipping send")
+                        if GPIO_VERBOSE:
+                            log("No WS clients connected; skipping send")
 
                 # Optional: also log release
                 elif prev == 0 and stable_value == 1:
-                    log("BUTTON RELEASE (end)")
+                    if GPIO_VERBOSE:
+                        log("BUTTON RELEASE (end)")
 
         await asyncio.sleep(POLL_INTERVAL)
 

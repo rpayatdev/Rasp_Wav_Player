@@ -4,7 +4,10 @@
 
   interface Track {
     name: string;
-    url: string;
+    fileHandle: FileSystemFileHandle;
+    sizeBytes: number;
+    ramUrl: string | null;
+    preloaded: boolean;
   }
 
   let audioElement: HTMLAudioElement | null = null;
@@ -12,13 +15,15 @@
   let currentTime = 0;
   let duration = 0;
   let volume = 0.75;
-  let primePromise: Promise<number | null> | null = null;
-  let isPriming = false;
   let lastWsDownTs: number | null = null;
   let lastPlayCallTs: number | null = null;
   let lastPlayTrigger: "gpio" | "ui" | "other" | null = null;
-  let lastPrimedUrl: string | null = null;
   let lastWsHandledTs = 0;
+  let isPreloadingDir = false;
+  let preloadProgressCount = 0;
+  let preloadTotalCount = 0;
+  let preloadError: string | null = null;
+  let preloadRunId = 0;
 
   // --- GPIO / WebSocket ---
   let ws: WebSocket | null = null;
@@ -66,8 +71,8 @@
 
   let dirError: string | null = null;
   let isLoadingDir = false;
-
-  let objectUrls: string[] = [];
+  const PRELOAD_TOO_LARGE_ERROR =
+    "Directory too large for RAM. Please choose a smaller folder.";
 
   // Scroll-Ref für Playlist
   let playlistScrollContainer: HTMLDivElement | null = null;
@@ -75,22 +80,82 @@
   const currentTrack = (): Track | null =>
     tracks.length > 0 ? tracks[currentIndex] : null;
 
-  function hasBufferedAudio(): boolean {
-    if (!audioElement) return false;
-    try {
-      const buf = audioElement.buffered;
-      if (!buf || buf.length === 0) return false;
-      const end = buf.end(buf.length - 1);
-      return Number.isFinite(end) && end > 0;
-    } catch {
-      return false;
+  function isDirectoryReadyForPlayback(): boolean {
+    if (tracks.length === 0 || isPreloadingDir || preloadError) return false;
+    return tracks.every((track) => track.preloaded && Boolean(track.ramUrl));
+  }
+
+  function currentTrackUrl(): string | undefined {
+    return currentTrack()?.ramUrl ?? undefined;
+  }
+
+  function clearRamUrlsForTracks(trackList: Track[]): void {
+    for (const track of trackList) {
+      if (track.ramUrl) {
+        URL.revokeObjectURL(track.ramUrl);
+      }
+      track.ramUrl = null;
+      track.preloaded = false;
     }
   }
 
-  function isReadyForInstantPlay(): boolean {
-    if (!audioElement) return false;
-    // HAVE_ENOUGH_DATA = 4, HAVE_FUTURE_DATA = 3; beide sind ausreichend
-    return audioElement.readyState >= 3 || hasBufferedAudio();
+  function cloneTracksForPlaylist(trackList: Track[]): Track[] {
+    return trackList.map((track) => ({
+      name: track.name,
+      fileHandle: track.fileHandle,
+      sizeBytes: track.sizeBytes,
+      ramUrl: null,
+      preloaded: false,
+    }));
+  }
+
+  async function preloadDirectoryTracksToRam(
+    trackList: Track[],
+    runId: number,
+  ): Promise<void> {
+    preloadError = null;
+    preloadProgressCount = 0;
+    preloadTotalCount = trackList.length;
+
+    if (trackList.length === 0) {
+      isPreloadingDir = false;
+      return;
+    }
+
+    isPreloadingDir = true;
+
+    try {
+      for (const track of trackList) {
+        if (runId !== preloadRunId) {
+          clearRamUrlsForTracks(trackList);
+          return;
+        }
+
+        const file = await track.fileHandle.getFile();
+        const buffer = await file.arrayBuffer();
+        const blob = new Blob([buffer], { type: file.type || "audio/wav" });
+
+        track.ramUrl = URL.createObjectURL(blob);
+        track.preloaded = true;
+        preloadProgressCount += 1;
+
+        // Trigger reactivity for progress and per-track readiness.
+        tracks = [...tracks];
+      }
+    } catch (err) {
+      if (runId !== preloadRunId) {
+        clearRamUrlsForTracks(trackList);
+        return;
+      }
+
+      clearRamUrlsForTracks(trackList);
+      preloadError = PRELOAD_TOO_LARGE_ERROR;
+      wsLog("error", "RAM preload failed", err);
+    } finally {
+      if (runId === preloadRunId) {
+        isPreloadingDir = false;
+      }
+    }
   }
 
   function formatTime(sec: number): string {
@@ -103,6 +168,15 @@
   function togglePlay(source: "ui" | "gpio" | "other" = "ui"): void {
     if (!audioElement || !currentTrack()) {
       wsLog("warn", "Toggle ignoriert: Kein Audioelement/Track", { source });
+      return;
+    }
+    if (!isDirectoryReadyForPlayback() || !currentTrack()?.ramUrl) {
+      wsLog("warn", "Toggle ignoriert: RAM-Preload nicht abgeschlossen", {
+        source,
+        preloadProgressCount,
+        preloadTotalCount,
+        preloadError,
+      });
       return;
     }
 
@@ -167,12 +241,6 @@
   function handlePlay(): void {
     if (!audioElement) return;
     const trackName = currentTrack()?.name ?? "unbekannt";
-    if (isPriming) {
-      wsLog("info", "Playback-Event während Prime (stumm)", {
-        track: trackName,
-      });
-      return;
-    }
     isPlaying = true;
     const now = performance.now();
     wsLog("info", "Playback gestartet", {
@@ -192,12 +260,6 @@
   function handlePause(): void {
     if (!audioElement) return;
     const trackName = currentTrack()?.name ?? "unbekannt";
-    if (isPriming) {
-      wsLog("info", "Pause-Event während Prime (stumm)", {
-        track: trackName,
-      });
-      return;
-    }
     isPlaying = false;
     const now = performance.now();
     wsLog("info", "Playback pausiert", {
@@ -214,115 +276,10 @@
   }
 
   function onSeekChange(event: Event): void {
-    if (!audioElement || !duration) return;
+    if (!audioElement || !duration || !isDirectoryReadyForPlayback()) return;
     const target = event.target as HTMLInputElement;
     const value = Number(target.value);
     audioElement.currentTime = (value / 100) * duration;
-  }
-
-  function clearObjectUrls(): void {
-    for (const url of objectUrls) {
-      URL.revokeObjectURL(url);
-    }
-    objectUrls = [];
-  }
-
-  async function primeCurrentTrack(): Promise<number | null> {
-    if (!audioElement || tracks.length === 0) {
-      wsLog("warn", "Prime übersprungen: Kein Audioelement/keine Tracks");
-      return null;
-    }
-
-    const track = currentTrack();
-    if (!track) return null;
-
-    if (primePromise) return primePromise;
-
-    // Nicht während laufender Wiedergabe primen, sonst droppen wir kurz den Ton.
-    if (!audioElement.paused) {
-      wsLog("info", "Prime übersprungen: Bereits in Wiedergabe");
-      return null;
-    }
-
-    const targetSrc = track.url;
-    if (audioElement.src !== targetSrc) {
-      audioElement.src = targetSrc;
-    }
-
-    if (audioElement.readyState >= 3 && hasBufferedAudio()) {
-      lastPrimedUrl = targetSrc;
-      wsLog("info", "Prime übersprungen: Puffer bereits bereit", {
-        track: track.name,
-        readyState: audioElement.readyState,
-      });
-      return performance.now();
-    }
-
-    primePromise = (async () => {
-      const trackName = track.name ?? "unbekannt";
-      const start = performance.now();
-      let end: number | null = null;
-      wsLog("info", "Prime gestartet", { track: trackName, startMs: start.toFixed(1) });
-
-      try {
-        isPriming = true;
-        const previousVolume = audioElement.volume;
-        const previousMuted = audioElement.muted;
-        const previousTime = audioElement.currentTime;
-        let restored = false;
-
-        audioElement.preload = "auto";
-        if (audioElement.src !== targetSrc) {
-          audioElement.src = targetSrc;
-        }
-        if (audioElement.readyState < 3) {
-          audioElement.load();
-        }
-
-        // Kurz anspielen zum Decoden, danach wieder stoppen.
-        audioElement.muted = true;
-        audioElement.volume = 0;
-
-        const playPromise = audioElement.play();
-        if (playPromise) {
-          await playPromise;
-        }
-        audioElement.pause();
-        audioElement.currentTime = previousTime;
-
-        audioElement.muted = previousMuted;
-        audioElement.volume = previousVolume;
-        restored = true;
-        lastPrimedUrl = targetSrc;
-      } catch (err) {
-        wsLog("warn", "Audio-Vorbereitung blockiert/fehlgeschlagen", err);
-      } finally {
-        // Fallback-Restore, falls ein Fehler vor dem Zurücksetzen passierte
-        if (audioElement) {
-          try {
-            audioElement.muted = false;
-            if (Number.isFinite(volume)) {
-              audioElement.volume = volume;
-            }
-          } catch (_err) {
-            /* ignore */
-          }
-        }
-
-        end = performance.now();
-        isPriming = false;
-        wsLog("info", "Prime beendet", {
-          track: trackName,
-          durationMs: (end - start).toFixed(1),
-        });
-        primePromise = null;
-        // Events setzen isPlaying beim Play/Pause ohnehin neu.
-      }
-
-      return end ?? performance.now();
-    })();
-
-    return primePromise;
   }
 
   async function pickRootDirectory(): Promise<void> {
@@ -340,7 +297,8 @@
       rootDirName = rootDirHandle?.name ?? "";
 
       isLoadingDir = true;
-      clearObjectUrls();
+      preloadRunId += 1;
+      clearRamUrlsForTracks(tracks);
 
       // Reset State
       tracks = [];
@@ -351,6 +309,10 @@
       currentTime = 0;
       duration = 0;
       isPlaying = false;
+      preloadError = null;
+      preloadProgressCount = 0;
+      preloadTotalCount = 0;
+      isPreloadingDir = false;
 
       if (rootDirHandle) {
         // basePath = "" => alle weiteren Pfade relativ zu diesem Root
@@ -407,13 +369,14 @@
         if (name.toLowerCase().endsWith(".wav")) {
           const fileHandle = handle as FileSystemFileHandle;
           const file = await fileHandle.getFile();
-          const url = URL.createObjectURL(file);
-          objectUrls.push(url);
 
           const track: Track = {
             // Track-Name = relativer Pfad ab Root (inkl. Unterordner)
             name: relativePath,
-            url,
+            fileHandle,
+            sizeBytes: file.size,
+            ramUrl: null,
+            preloaded: false,
           };
 
           node.tracks?.push(track);
@@ -535,25 +498,33 @@
     const dir = directories.find((d) => d.path === path);
     if (!dir) return;
 
+    preloadRunId += 1;
+    const runId = preloadRunId;
+    clearRamUrlsForTracks(tracks);
+
     selectedDirPath = dir.path;
 
     // Playlist = WAVs nur aus diesem Ordner
-    tracks = dir.tracks ?? [];
+    tracks = cloneTracksForPlaylist(dir.tracks ?? []);
     currentIndex = 0;
     currentTime = 0;
     duration = 0;
+    preloadError = null;
+    preloadProgressCount = 0;
+    preloadTotalCount = tracks.length;
 
     // Playlist-Scroll nach oben, wenn Ordner gewechselt wird
     void scrollPlaylistToTop();
 
-    if (!audioElement) return;
+    if (audioElement) {
+      audioElement.pause();
+      isPlaying = false;
+      audioElement.removeAttribute("src");
+      audioElement.load();
+      audioElement.volume = volume;
+    }
 
-    audioElement.pause();
-    isPlaying = false;
-
-    if (!audioElement || tracks.length === 0) return;
-    audioElement.volume = volume;
-    void primeCurrentTrack();
+    void preloadDirectoryTracksToRam(tracks, runId);
   }
 
   function selectTrack(index: number): void {
@@ -582,7 +553,6 @@
     // Neuen Track laden, aber NICHT autoplayen
     if (audioElement && currentTrack()) {
       audioElement.volume = volume;
-      void primeCurrentTrack();
     }
   }
 
@@ -645,7 +615,7 @@
     }
   }
 
-  const handleGpioMessage = async (event: MessageEvent): Promise<void> => {
+  const handleGpioMessage = (event: MessageEvent): void => {
     const msg =
       typeof event.data === "string" ? event.data.trim() : String(event.data);
 
@@ -675,6 +645,14 @@
       wsLog("warn", "DOWN ignoriert: Keine Tracks geladen");
       return;
     }
+    if (!isDirectoryReadyForPlayback() || !currentTrack()?.ramUrl) {
+      wsLog("warn", "DOWN ignoriert: RAM-Preload noch nicht fertig", {
+        preloadProgressCount,
+        preloadTotalCount,
+        preloadError,
+      });
+      return;
+    }
 
     const trackName = currentTrack()?.name ?? "unbekannt";
     const wasPaused = audioElement.paused;
@@ -692,19 +670,7 @@
       return;
     }
 
-    if (isReadyForInstantPlay()) {
-      wsLog("info", "GPIO play sofort (Media bereit)", { track: trackName });
-      togglePlay("gpio");
-      return;
-    }
-
-    const primeEnd = await primeCurrentTrack();
-    const readyMs = primeEnd ?? performance.now();
-    wsLog("info", "GPIO bereit zum Abspielen", {
-      elapsedMs: (readyMs - receivedAt).toFixed(1),
-      track: trackName,
-    });
-
+    wsLog("info", "GPIO Play angefordert (RAM bereit)", { track: trackName });
     togglePlay("gpio");
   };
 
@@ -797,6 +763,8 @@
     };
 
     return () => {
+      preloadRunId += 1;
+      clearRamUrlsForTracks(tracks);
       window.removeEventListener("resize", handleResize);
       ws?.close();
     };
@@ -839,7 +807,7 @@
 
       <audio
         bind:this={audioElement}
-        src={tracks.length > 0 ? tracks[currentIndex].url : undefined}
+        src={currentTrackUrl()}
         preload="auto"
         on:loadedmetadata={onLoadedMetadata}
         on:timeupdate={onTimeUpdate}
@@ -849,15 +817,24 @@
       ></audio>
 
       <div class="control-buttons">
-        <button on:click={goPrevTrack} disabled={tracks.length === 0}>
+        <button
+          on:click={goPrevTrack}
+          disabled={tracks.length === 0 || !isDirectoryReadyForPlayback()}
+        >
           ⏮
         </button>
 
-        <button on:click={() => togglePlay("ui")} disabled={tracks.length === 0}>
+        <button
+          on:click={() => togglePlay("ui")}
+          disabled={tracks.length === 0 || !isDirectoryReadyForPlayback()}
+        >
           {isPlaying ? "⏸" : "▶"}
         </button>
 
-        <button on:click={goNextTrack} disabled={tracks.length === 0}>
+        <button
+          on:click={goNextTrack}
+          disabled={tracks.length === 0 || !isDirectoryReadyForPlayback()}
+        >
           ⏭
         </button>
       </div>
@@ -869,7 +846,7 @@
         step="0.1"
         value={duration ? (currentTime / duration) * 100 : 0}
         on:input={onSeekChange}
-        disabled={tracks.length === 0}
+        disabled={tracks.length === 0 || !isDirectoryReadyForPlayback()}
       />
 
       <div class="time">
@@ -889,6 +866,20 @@
           on:input={onVolumeChange}
         />
       </div>
+
+      {#if tracks.length > 0}
+        <p class="gpio-status">
+          {#if preloadError}
+            {preloadError}
+          {:else if isPreloadingDir}
+            Loading into RAM: {preloadProgressCount}/{preloadTotalCount}
+          {:else if isDirectoryReadyForPlayback()}
+            RAM preload complete: {preloadTotalCount}/{preloadTotalCount}
+          {:else}
+            RAM preload pending
+          {/if}
+        </p>
+      {/if}
 
             <p class="gpio-status">
         GPIO-Button:&nbsp;

@@ -1,7 +1,10 @@
 <script lang="ts" context="module">
   export interface Track {
     name: string;
-    url: string;
+    fileHandle: FileSystemFileHandle;
+    sizeBytes: number;
+    ramUrl: string | null;
+    preloaded: boolean;
   }
 
   export interface DirNode {

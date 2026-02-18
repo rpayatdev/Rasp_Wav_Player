@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
+  import { fade, scale } from "svelte/transition";
   import DirView, { type DirNode } from "./lib/DirView.svelte";
 
   interface Track {
@@ -1318,8 +1319,18 @@
   </div>
 
   {#if showRamLoadingOverlay()}
-    <div class="ui-overlay-backdrop">
-      <section class="ui-loading-popup" role="status" aria-live="polite">
+    <div
+      class="ui-overlay-backdrop"
+      in:fade={{ duration: 140 }}
+      out:fade={{ duration: 120 }}
+    >
+      <section
+        class="ui-loading-popup"
+        role="status"
+        aria-live="polite"
+        in:scale={{ duration: 170, start: 0.96 }}
+        out:scale={{ duration: 120, start: 0.98 }}
+      >
         <span class="ui-spinner" aria-hidden="true"></span>
         <h3>Lade Songs in den Arbeitsspeicher...</h3>
         <p>{preloadProgressCount}/{preloadTotalCount}</p>
@@ -1328,13 +1339,19 @@
   {/if}
 
   {#if currentUiError}
-    <div class="ui-overlay-backdrop">
+    <div
+      class="ui-overlay-backdrop"
+      in:fade={{ duration: 160 }}
+      out:fade={{ duration: 120 }}
+    >
       <div
         class="ui-error-modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby={"ui-error-title-" + currentUiError.id}
         aria-describedby={"ui-error-description-" + currentUiError.id}
+        in:scale={{ duration: 180, start: 0.95 }}
+        out:scale={{ duration: 130, start: 0.98 }}
       >
         <h3 id={"ui-error-title-" + currentUiError.id}>{currentUiError.title}</h3>
         <p id={"ui-error-description-" + currentUiError.id}>

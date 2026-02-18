@@ -25,6 +25,11 @@
   let preloadTotalCount = 0;
   let preloadError: string | null = null;
   let preloadRunId = 0;
+  let preloadMode: "full" | "rolling" = "full";
+  let playError: string | null = null;
+  let playAttemptId = 0;
+  let playRequestedExplicitly = false;
+  let fallbackDirectUrl: string | null = null;
 
   // --- GPIO / WebSocket ---
   let ws: WebSocket | null = null;
@@ -72,8 +77,8 @@
 
   let dirError: string | null = null;
   let isLoadingDir = false;
-  const PRELOAD_TOO_LARGE_ERROR =
-    "Directory too large for RAM. Please choose a smaller folder.";
+  const ROLLING_CACHE_NOTICE =
+    "Low-RAM mode active: caching current + next track only.";
 
   // Scroll-Ref für Playlist
   let playlistScrollContainer: HTMLDivElement | null = null;
@@ -81,13 +86,27 @@
   const currentTrack = (): Track | null =>
     tracks.length > 0 ? tracks[currentIndex] : null;
 
+  const nextTrackIndex = (index: number): number =>
+    tracks.length === 0 ? 0 : (index + 1) % tracks.length;
+
   function isDirectoryReadyForPlayback(): boolean {
-    if (tracks.length === 0 || isPreloadingDir || preloadError) return false;
+    if (tracks.length === 0 || preloadError) return false;
+    if (preloadMode === "rolling") {
+      return Boolean(currentTrack()?.preloaded && currentTrack()?.ramUrl);
+    }
+    if (isPreloadingDir) return false;
     return tracks.every((track) => track.preloaded && Boolean(track.ramUrl));
   }
 
   function currentTrackUrl(): string | undefined {
     return currentTrack()?.ramUrl ?? undefined;
+  }
+
+  function clearFallbackDirectUrl(): void {
+    if (fallbackDirectUrl) {
+      URL.revokeObjectURL(fallbackDirectUrl);
+      fallbackDirectUrl = null;
+    }
   }
 
   function clearRamUrlsForTracks(trackList: Track[]): void {
@@ -97,6 +116,87 @@
       }
       track.ramUrl = null;
       track.preloaded = false;
+    }
+  }
+
+  function rollingWindowIndices(centerIndex: number): Set<number> {
+    const keep = new Set<number>();
+    if (tracks.length === 0) return keep;
+
+    const safeCenter = Math.max(0, Math.min(centerIndex, tracks.length - 1));
+    keep.add(safeCenter);
+    if (tracks.length > 1) {
+      keep.add(nextTrackIndex(safeCenter));
+    }
+    return keep;
+  }
+
+  function pruneRamCacheToWindow(keep: Set<number>): void {
+    for (let i = 0; i < tracks.length; i += 1) {
+      if (keep.has(i)) continue;
+      const track = tracks[i];
+      if (track.ramUrl) {
+        URL.revokeObjectURL(track.ramUrl);
+      }
+      track.ramUrl = null;
+      track.preloaded = false;
+    }
+  }
+
+  function setRollingProgress(centerIndex: number): void {
+    const keep = rollingWindowIndices(centerIndex);
+    preloadTotalCount = keep.size;
+    preloadProgressCount = Array.from(keep).filter((index) => {
+      const track = tracks[index];
+      return Boolean(track?.preloaded && track?.ramUrl);
+    }).length;
+  }
+
+  async function ensureRollingWindowLoaded(
+    centerIndex: number,
+    runId: number,
+  ): Promise<void> {
+    if (runId !== preloadRunId || tracks.length === 0) return;
+    if (preloadMode !== "rolling") return;
+    preloadError = null;
+
+    const keep = rollingWindowIndices(centerIndex);
+    const order = Array.from(keep);
+    if (order.length === 0) return;
+
+    // Current track first, then preload "next".
+    order.sort((a, b) => (a === centerIndex ? -1 : b === centerIndex ? 1 : a - b));
+
+    const current = tracks[centerIndex];
+    if (current && (!current.preloaded || !current.ramUrl)) {
+      isPreloadingDir = true;
+    }
+
+    try {
+      for (const index of order) {
+        if (runId !== preloadRunId || preloadMode !== "rolling") return;
+        const track = tracks[index];
+        if (!track || (track.preloaded && track.ramUrl)) continue;
+
+        const file = await track.fileHandle.getFile();
+        if (runId !== preloadRunId || preloadMode !== "rolling") return;
+
+        track.ramUrl = URL.createObjectURL(file);
+        track.preloaded = true;
+      }
+
+      if (runId !== preloadRunId || preloadMode !== "rolling") return;
+      pruneRamCacheToWindow(keep);
+      setRollingProgress(centerIndex);
+      tracks = [...tracks];
+    } catch (err) {
+      if (runId !== preloadRunId) return;
+      preloadError = `Rolling cache failed: ${describePlayError(err)}`;
+      wsLog("error", "Rolling cache failed", err);
+    } finally {
+      if (runId === preloadRunId && preloadMode === "rolling") {
+        isPreloadingDir = false;
+      }
     }
   }
 
@@ -114,6 +214,7 @@
     trackList: Track[],
     runId: number,
   ): Promise<void> {
+    preloadMode = "full";
     preloadError = null;
     preloadProgressCount = 0;
     preloadTotalCount = trackList.length;
@@ -133,10 +234,7 @@
         }
 
         const file = await track.fileHandle.getFile();
-        const buffer = await file.arrayBuffer();
-        const blob = new Blob([buffer], { type: file.type || "audio/wav" });
-
-        track.ramUrl = URL.createObjectURL(blob);
+        track.ramUrl = URL.createObjectURL(file);
         track.preloaded = true;
         preloadProgressCount += 1;
 
@@ -150,10 +248,13 @@
       }
 
       clearRamUrlsForTracks(trackList);
-      preloadError = PRELOAD_TOO_LARGE_ERROR;
-      wsLog("error", "RAM preload failed", err);
+      preloadMode = "rolling";
+      preloadError = null;
+      wsLog("warn", "Full RAM preload failed, switching to rolling cache", err);
+      setRollingProgress(currentIndex);
+      await ensureRollingWindowLoaded(currentIndex, runId);
     } finally {
-      if (runId === preloadRunId) {
+      if (runId === preloadRunId && preloadMode === "full") {
         isPreloadingDir = false;
       }
     }
@@ -166,12 +267,96 @@
     return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   }
 
+  function describePlayError(err: unknown): string {
+    if (err instanceof DOMException) {
+      return `${err.name}: ${err.message}`;
+    }
+    if (err instanceof Error) {
+      return err.message;
+    }
+    return String(err);
+  }
+
+  async function tryPlayWithOptionalFallback(
+    source: "ui" | "gpio" | "other",
+    startedAt: number,
+    attemptId: number,
+  ): Promise<void> {
+    if (!audioElement || !currentTrack()) return;
+
+    try {
+      const playPromise = audioElement.play();
+      if (playPromise) {
+        await playPromise;
+      }
+      if (attemptId !== playAttemptId) return;
+
+      playError = null;
+      const resolvedAt = performance.now();
+      wsLog("info", "Play-Promise erfuellt", {
+        source,
+        track: currentTrack()?.name ?? "unbekannt",
+        dtMs: (resolvedAt - startedAt).toFixed(1),
+        sinceWsMs:
+          lastWsDownTs !== null ? (resolvedAt - lastWsDownTs).toFixed(1) : undefined,
+      });
+      return;
+    } catch (err) {
+      if (attemptId !== playAttemptId) return;
+
+      const initialErrorText = describePlayError(err);
+      wsLog("error", "Play-Promise fehlgeschlagen", err);
+      wsLog("warn", "Versuche einmaligen Fallback auf direkte File-URL", {
+        source,
+        track: currentTrack()?.name ?? "unbekannt",
+        error: initialErrorText,
+      });
+
+      try {
+        const track = currentTrack();
+        if (!track || !audioElement) {
+          playError = `Playback failed: ${initialErrorText}`;
+          playRequestedExplicitly = false;
+          return;
+        }
+
+        clearFallbackDirectUrl();
+        const file = await track.fileHandle.getFile();
+        if (attemptId !== playAttemptId || !audioElement) return;
+
+        fallbackDirectUrl = URL.createObjectURL(file);
+        audioElement.src = fallbackDirectUrl;
+        audioElement.load();
+
+        const fallbackPromise = audioElement.play();
+        if (fallbackPromise) {
+          await fallbackPromise;
+        }
+        if (attemptId !== playAttemptId) return;
+
+        playError = null;
+        wsLog("info", "Fallback-Play erfolgreich", {
+          source,
+          track: track.name,
+        });
+      } catch (fallbackErr) {
+        if (attemptId !== playAttemptId) return;
+        const fallbackErrorText = describePlayError(fallbackErr);
+        playError = `Playback failed: ${initialErrorText} | fallback failed: ${fallbackErrorText}`;
+        playRequestedExplicitly = false;
+        wsLog("error", "Fallback-Play fehlgeschlagen", fallbackErr);
+      }
+    }
+  }
+
   function togglePlay(source: "ui" | "gpio" | "other" = "ui"): void {
     if (!audioElement || !currentTrack()) {
+      playRequestedExplicitly = false;
       wsLog("warn", "Toggle ignoriert: Kein Audioelement/Track", { source });
       return;
     }
     if (!isDirectoryReadyForPlayback() || !currentTrack()?.ramUrl) {
+      playRequestedExplicitly = false;
       wsLog("warn", "Toggle ignoriert: RAM-Preload nicht abgeschlossen", {
         source,
         preloadProgressCount,
@@ -184,6 +369,7 @@
     const now = performance.now();
     lastPlayTrigger = source;
     lastPlayCallTs = now;
+    playError = null;
 
     if (audioElement.paused) {
       wsLog("info", "Play angefordert", {
@@ -195,30 +381,16 @@
             : undefined,
       });
 
-      const playPromise = audioElement.play();
-      if (playPromise) {
-        playPromise
-          .then(() => {
-            const resolvedAt = performance.now();
-            wsLog("info", "Play-Promise erfüllt", {
-              source,
-              track: currentTrack()?.name ?? "unbekannt",
-              dtMs: (resolvedAt - now).toFixed(1),
-              sinceWsMs:
-                lastWsDownTs !== null
-                  ? (resolvedAt - lastWsDownTs).toFixed(1)
-                  : undefined,
-            });
-          })
-          .catch((err) => {
-            wsLog("error", "Play-Promise fehlgeschlagen", err);
-          });
-      }
+      playRequestedExplicitly = true;
+      playAttemptId += 1;
+      const attemptId = playAttemptId;
+      void tryPlayWithOptionalFallback(source, now, attemptId);
     } else {
       wsLog("info", "Pause angefordert", {
         source,
         track: currentTrack()?.name ?? "unbekannt",
       });
+      playRequestedExplicitly = false;
       audioElement.pause();
     }
   }
@@ -241,8 +413,17 @@
 
   function handlePlay(): void {
     if (!audioElement) return;
+    if (!playRequestedExplicitly) {
+      wsLog("warn", "Unerwartetes Play ohne expliziten Trigger - stoppe", {
+        track: currentTrack()?.name ?? "unbekannt",
+      });
+      audioElement.pause();
+      return;
+    }
+    playRequestedExplicitly = false;
     const trackName = currentTrack()?.name ?? "unbekannt";
     isPlaying = true;
+    playError = null;
     const now = performance.now();
     wsLog("info", "Playback gestartet", {
       track: trackName,
@@ -260,6 +441,7 @@
 
   function handlePause(): void {
     if (!audioElement) return;
+    playRequestedExplicitly = false;
     const trackName = currentTrack()?.name ?? "unbekannt";
     isPlaying = false;
     const now = performance.now();
@@ -299,7 +481,10 @@
 
       isLoadingDir = true;
       preloadRunId += 1;
+      playAttemptId += 1;
+      playRequestedExplicitly = false;
       clearRamUrlsForTracks(tracks);
+      clearFallbackDirectUrl();
 
       // Reset State
       tracks = [];
@@ -311,6 +496,8 @@
       duration = 0;
       isPlaying = false;
       preloadError = null;
+      playError = null;
+      preloadMode = "full";
       preloadProgressCount = 0;
       preloadTotalCount = 0;
       isPreloadingDir = false;
@@ -500,13 +687,18 @@
     if (!dir) return;
 
     preloadRunId += 1;
+    playAttemptId += 1;
+    playRequestedExplicitly = false;
     const runId = preloadRunId;
+    playError = null;
     clearRamUrlsForTracks(tracks);
+    clearFallbackDirectUrl();
 
     selectedDirPath = dir.path;
 
     // Playlist = WAVs nur aus diesem Ordner
     tracks = cloneTracksForPlaylist(dir.tracks ?? []);
+    preloadMode = "full";
     currentIndex = 0;
     currentTime = 0;
     duration = 0;
@@ -540,12 +732,20 @@
       isPlaying = false;
       currentTime = 0;
       duration = 0;
+      if (preloadMode === "rolling") {
+        setRollingProgress(currentIndex);
+        void ensureRollingWindowLoaded(currentIndex, preloadRunId);
+      }
       return;
     }
 
-    // Immer stoppen â€“ kein automatisches Weiterspielen
+    // Immer stoppen - kein automatisches Weiterspielen
     audioElement.pause();
     isPlaying = false;
+    playAttemptId += 1;
+    playRequestedExplicitly = false;
+    playError = null;
+    clearFallbackDirectUrl();
 
     currentIndex = index;
     currentTime = 0;
@@ -554,6 +754,11 @@
     // Neuen Track laden, aber NICHT autoplayen
     if (audioElement && currentTrack()) {
       audioElement.volume = volume;
+      audioElement.load();
+    }
+    if (preloadMode === "rolling") {
+      setRollingProgress(currentIndex);
+      void ensureRollingWindowLoaded(currentIndex, preloadRunId);
     }
   }
 
@@ -586,6 +791,7 @@
   }
 
   function onEnded(): void {
+    playRequestedExplicitly = false;
     const trackName = currentTrack()?.name ?? "unbekannt";
     const position =
       audioElement && Number.isFinite(audioElement.currentTime)
@@ -685,6 +891,7 @@
     if (!wasPaused) {
       lastPlayTrigger = "gpio";
       lastPlayCallTs = receivedAt;
+      playRequestedExplicitly = false;
       wsLog("info", "GPIO Pause angefordert", {
         track: trackName,
         position: Number.isFinite(audioElement.currentTime)
@@ -789,7 +996,10 @@
 
     return () => {
       preloadRunId += 1;
+      playAttemptId += 1;
+      playRequestedExplicitly = false;
       clearRamUrlsForTracks(tracks);
+      clearFallbackDirectUrl();
       window.removeEventListener("resize", handleResize);
       ws?.close();
     };
@@ -844,7 +1054,7 @@
       <div class="control-buttons">
         <button
           on:click={goPrevTrack}
-          disabled={tracks.length === 0 || !isDirectoryReadyForPlayback()}
+          disabled={tracks.length === 0}
         >
           ⏮
         </button>
@@ -858,7 +1068,7 @@
 
         <button
           on:click={goNextTrack}
-          disabled={tracks.length === 0 || !isDirectoryReadyForPlayback()}
+          disabled={tracks.length === 0}
         >
           ⏭
         </button>
@@ -896,6 +1106,8 @@
         <p class="gpio-status">
           {#if preloadError}
             {preloadError}
+          {:else if preloadMode === "rolling"}
+            {ROLLING_CACHE_NOTICE} ({preloadProgressCount}/{preloadTotalCount})
           {:else if isPreloadingDir}
             Loading into RAM: {preloadProgressCount}/{preloadTotalCount}
           {:else if isDirectoryReadyForPlayback()}
@@ -904,6 +1116,9 @@
             RAM preload pending
           {/if}
         </p>
+      {/if}
+      {#if playError}
+        <p class="gpio-status">{playError}</p>
       {/if}
 
             <p class="gpio-status">

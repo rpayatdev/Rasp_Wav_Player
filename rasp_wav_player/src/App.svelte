@@ -10,6 +10,14 @@
     preloaded: boolean;
   }
 
+  interface UiErrorItem {
+    id: number;
+    source: "dir" | "preload" | "play";
+    title: string;
+    message: string;
+    createdAt: number;
+  }
+
   let audioElement: HTMLAudioElement | null = null;
   let isPlaying = false;
   let currentTime = 0;
@@ -29,6 +37,7 @@
   let playError: string | null = null;
   let playAttemptId = 0;
   let playRequestedExplicitly = false;
+  let isPlayStarting = false;
   let fallbackDirectUrl: string | null = null;
 
   // --- GPIO / WebSocket ---
@@ -79,6 +88,14 @@
   let isLoadingDir = false;
   const ROLLING_CACHE_NOTICE =
     "Low-RAM mode active: caching current + next track only.";
+  let uiErrorQueue: UiErrorItem[] = [];
+  let nextUiErrorId = 1;
+  let lastSeenDirError: string | null = null;
+  let lastSeenPreloadError: string | null = null;
+  let lastSeenPlayError: string | null = null;
+  let errorModalCloseButton: HTMLButtonElement | null = null;
+  let lastFocusedErrorId: number | null = null;
+  let currentUiError: UiErrorItem | null = null;
 
   // Scroll-Ref für Playlist
   let playlistScrollContainer: HTMLDivElement | null = null;
@@ -88,6 +105,39 @@
 
   const nextTrackIndex = (index: number): number =>
     tracks.length === 0 ? 0 : (index + 1) % tracks.length;
+
+  const activeUiError = (): UiErrorItem | null => uiErrorQueue[0] ?? null;
+
+  const showRamLoadingOverlay = (): boolean =>
+    tracks.length > 0 && isPreloadingDir;
+
+  function enqueueUiError(
+    source: UiErrorItem["source"],
+    title: string,
+    message: string,
+  ): void {
+    const item: UiErrorItem = {
+      id: nextUiErrorId,
+      source,
+      title,
+      message,
+      createdAt: Date.now(),
+    };
+    nextUiErrorId += 1;
+    uiErrorQueue = [...uiErrorQueue, item];
+  }
+
+  function dismissActiveUiError(): void {
+    if (uiErrorQueue.length === 0) return;
+    uiErrorQueue = uiErrorQueue.slice(1);
+  }
+
+  function handleWindowKeydown(event: KeyboardEvent): void {
+    if (event.key !== "Escape") return;
+    if (!activeUiError()) return;
+    event.preventDefault();
+    dismissActiveUiError();
+  }
 
   function isDirectoryReadyForPlayback(): boolean {
     if (tracks.length === 0 || preloadError) return false;
@@ -277,12 +327,20 @@
     return String(err);
   }
 
+  function cancelPendingPlayAttempt(): void {
+    playAttemptId += 1;
+    playRequestedExplicitly = false;
+    isPlayStarting = false;
+  }
+
   async function tryPlayWithOptionalFallback(
     source: "ui" | "gpio" | "other",
     startedAt: number,
     attemptId: number,
   ): Promise<void> {
     if (!audioElement || !currentTrack()) return;
+
+    isPlayStarting = true;
 
     try {
       const playPromise = audioElement.play();
@@ -291,6 +349,7 @@
       }
       if (attemptId !== playAttemptId) return;
 
+      isPlayStarting = false;
       playError = null;
       const resolvedAt = performance.now();
       wsLog("info", "Play-Promise erfuellt", {
@@ -303,6 +362,16 @@
       return;
     } catch (err) {
       if (attemptId !== playAttemptId) return;
+      isPlayStarting = false;
+
+      if (err instanceof DOMException && err.name === "AbortError") {
+        playError = null;
+        wsLog("info", "Play-Promise abgebrochen (erwartet)", {
+          source,
+          track: currentTrack()?.name ?? "unbekannt",
+        });
+        return;
+      }
 
       const initialErrorText = describePlayError(err);
       wsLog("error", "Play-Promise fehlgeschlagen", err);
@@ -328,12 +397,14 @@
         audioElement.src = fallbackDirectUrl;
         audioElement.load();
 
+        isPlayStarting = true;
         const fallbackPromise = audioElement.play();
         if (fallbackPromise) {
           await fallbackPromise;
         }
         if (attemptId !== playAttemptId) return;
 
+        isPlayStarting = false;
         playError = null;
         wsLog("info", "Fallback-Play erfolgreich", {
           source,
@@ -341,6 +412,18 @@
         });
       } catch (fallbackErr) {
         if (attemptId !== playAttemptId) return;
+        isPlayStarting = false;
+        if (
+          fallbackErr instanceof DOMException &&
+          fallbackErr.name === "AbortError"
+        ) {
+          playError = null;
+          wsLog("info", "Fallback-Play abgebrochen (erwartet)", {
+            source,
+            track: currentTrack()?.name ?? "unbekannt",
+          });
+          return;
+        }
         const fallbackErrorText = describePlayError(fallbackErr);
         playError = `Playback failed: ${initialErrorText} | fallback failed: ${fallbackErrorText}`;
         playRequestedExplicitly = false;
@@ -351,12 +434,12 @@
 
   function togglePlay(source: "ui" | "gpio" | "other" = "ui"): void {
     if (!audioElement || !currentTrack()) {
-      playRequestedExplicitly = false;
+      cancelPendingPlayAttempt();
       wsLog("warn", "Toggle ignoriert: Kein Audioelement/Track", { source });
       return;
     }
     if (!isDirectoryReadyForPlayback() || !currentTrack()?.ramUrl) {
-      playRequestedExplicitly = false;
+      cancelPendingPlayAttempt();
       wsLog("warn", "Toggle ignoriert: RAM-Preload nicht abgeschlossen", {
         source,
         preloadProgressCount,
@@ -371,7 +454,7 @@
     lastPlayCallTs = now;
     playError = null;
 
-    if (audioElement.paused) {
+    if (!isPlaying && !isPlayStarting) {
       wsLog("info", "Play angefordert", {
         source,
         track: currentTrack()?.name ?? "unbekannt",
@@ -386,12 +469,14 @@
       const attemptId = playAttemptId;
       void tryPlayWithOptionalFallback(source, now, attemptId);
     } else {
-      wsLog("info", "Pause angefordert", {
+      wsLog("info", isPlayStarting ? "Play-Start abgebrochen" : "Pause angefordert", {
         source,
         track: currentTrack()?.name ?? "unbekannt",
       });
-      playRequestedExplicitly = false;
-      audioElement.pause();
+      cancelPendingPlayAttempt();
+      if (!audioElement.paused) {
+        audioElement.pause();
+      }
     }
   }
 
@@ -414,6 +499,7 @@
   function handlePlay(): void {
     if (!audioElement) return;
     if (!playRequestedExplicitly) {
+      isPlayStarting = false;
       wsLog("warn", "Unerwartetes Play ohne expliziten Trigger - stoppe", {
         track: currentTrack()?.name ?? "unbekannt",
       });
@@ -421,6 +507,7 @@
       return;
     }
     playRequestedExplicitly = false;
+    isPlayStarting = false;
     const trackName = currentTrack()?.name ?? "unbekannt";
     isPlaying = true;
     playError = null;
@@ -442,6 +529,7 @@
   function handlePause(): void {
     if (!audioElement) return;
     playRequestedExplicitly = false;
+    isPlayStarting = false;
     const trackName = currentTrack()?.name ?? "unbekannt";
     isPlaying = false;
     const now = performance.now();
@@ -481,8 +569,7 @@
 
       isLoadingDir = true;
       preloadRunId += 1;
-      playAttemptId += 1;
-      playRequestedExplicitly = false;
+      cancelPendingPlayAttempt();
       clearRamUrlsForTracks(tracks);
       clearFallbackDirectUrl();
 
@@ -687,8 +774,7 @@
     if (!dir) return;
 
     preloadRunId += 1;
-    playAttemptId += 1;
-    playRequestedExplicitly = false;
+    cancelPendingPlayAttempt();
     const runId = preloadRunId;
     playError = null;
     clearRamUrlsForTracks(tracks);
@@ -742,8 +828,7 @@
     // Immer stoppen - kein automatisches Weiterspielen
     audioElement.pause();
     isPlaying = false;
-    playAttemptId += 1;
-    playRequestedExplicitly = false;
+    cancelPendingPlayAttempt();
     playError = null;
     clearFallbackDirectUrl();
 
@@ -792,6 +877,7 @@
 
   function onEnded(): void {
     playRequestedExplicitly = false;
+    isPlayStarting = false;
     const trackName = currentTrack()?.name ?? "unbekannt";
     const position =
       audioElement && Number.isFinite(audioElement.currentTime)
@@ -891,7 +977,7 @@
     if (!wasPaused) {
       lastPlayTrigger = "gpio";
       lastPlayCallTs = receivedAt;
-      playRequestedExplicitly = false;
+      cancelPendingPlayAttempt();
       wsLog("info", "GPIO Pause angefordert", {
         track: trackName,
         position: Number.isFinite(audioElement.currentTime)
@@ -945,6 +1031,40 @@
     void scrollCurrentTrackIntoView();
   }
 
+  $: if (dirError === null) {
+    lastSeenDirError = null;
+  } else if (dirError !== lastSeenDirError) {
+    enqueueUiError("dir", "Ordnerfehler", dirError);
+    lastSeenDirError = dirError;
+  }
+
+  $: if (preloadError === null) {
+    lastSeenPreloadError = null;
+  } else if (preloadError !== lastSeenPreloadError) {
+    enqueueUiError("preload", "RAM-Preload-Fehler", preloadError);
+    lastSeenPreloadError = preloadError;
+  }
+
+  $: if (playError === null) {
+    lastSeenPlayError = null;
+  } else if (playError !== lastSeenPlayError) {
+    enqueueUiError("play", "Wiedergabe-Fehler", playError);
+    lastSeenPlayError = playError;
+  }
+
+  $: currentUiError = activeUiError();
+
+  $: {
+    if (!currentUiError) {
+      lastFocusedErrorId = null;
+    } else if (currentUiError.id !== lastFocusedErrorId) {
+      lastFocusedErrorId = currentUiError.id;
+      void tick().then(() => {
+        errorModalCloseButton?.focus();
+      });
+    }
+  }
+
   onMount(() => {
     // Audio initial setzen
     if (audioElement) {
@@ -996,8 +1116,7 @@
 
     return () => {
       preloadRunId += 1;
-      playAttemptId += 1;
-      playRequestedExplicitly = false;
+      cancelPendingPlayAttempt();
       clearRamUrlsForTracks(tracks);
       clearFallbackDirectUrl();
       window.removeEventListener("resize", handleResize);
@@ -1005,6 +1124,8 @@
     };
   });
 </script>
+
+<svelte:window on:keydown={handleWindowKeydown} />
 
 <main>
   <div class="app-topbar">
@@ -1104,9 +1225,7 @@
 
       {#if tracks.length > 0}
         <p class="gpio-status">
-          {#if preloadError}
-            {preloadError}
-          {:else if preloadMode === "rolling"}
+          {#if preloadMode === "rolling"}
             {ROLLING_CACHE_NOTICE} ({preloadProgressCount}/{preloadTotalCount})
           {:else if isPreloadingDir}
             Loading into RAM: {preloadProgressCount}/{preloadTotalCount}
@@ -1116,9 +1235,6 @@
             RAM preload pending
           {/if}
         </p>
-      {/if}
-      {#if playError}
-        <p class="gpio-status">{playError}</p>
       {/if}
 
             <p class="gpio-status">
@@ -1148,10 +1264,6 @@
           📂
         </button>
       </header>
-
-      {#if dirError}
-        <p class="dir-error">{dirError}</p>
-      {/if}
 
       {#if directories.length > 0}
         <div class="dir-list-container">
@@ -1204,4 +1316,43 @@
       </section>
     </article>
   </div>
+
+  {#if showRamLoadingOverlay()}
+    <div class="ui-overlay-backdrop">
+      <section class="ui-loading-popup" role="status" aria-live="polite">
+        <span class="ui-spinner" aria-hidden="true"></span>
+        <h3>Lade Songs in den Arbeitsspeicher...</h3>
+        <p>{preloadProgressCount}/{preloadTotalCount}</p>
+      </section>
+    </div>
+  {/if}
+
+  {#if currentUiError}
+    <div class="ui-overlay-backdrop">
+      <div
+        class="ui-error-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={"ui-error-title-" + currentUiError.id}
+        aria-describedby={"ui-error-description-" + currentUiError.id}
+      >
+        <h3 id={"ui-error-title-" + currentUiError.id}>{currentUiError.title}</h3>
+        <p id={"ui-error-description-" + currentUiError.id}>
+          {currentUiError.message}
+        </p>
+        {#if uiErrorQueue.length > 1}
+          <p>Noch {uiErrorQueue.length - 1} weitere Meldungen.</p>
+        {/if}
+        <div class="ui-error-actions">
+          <button
+            type="button"
+            bind:this={errorModalCloseButton}
+            on:click={dismissActiveUiError}
+          >
+            Schliessen
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </main>

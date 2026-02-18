@@ -428,3 +428,85 @@ input[type="range"] {
   outline: 2px solid rgba(255, 255, 255, 0.8);
   outline-offset: 2px;
 }
+
+.ui-overlay-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+  pointer-events: all;
+}
+
+.ui-loading-popup {
+  width: min(300px, 92vw);
+  padding: 1rem 1.2rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: linear-gradient(145deg, #1b1b1b, #141414);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.5);
+  text-align: center;
+}
+
+.ui-loading-popup h3 {
+  margin: 0.55rem 0 0.25rem;
+  font-size: 0.96rem;
+}
+
+.ui-loading-popup p {
+  margin: 0;
+  font-size: 0.78rem;
+  opacity: 0.82;
+}
+
+.ui-spinner {
+  display: inline-block;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.22);
+  border-top-color: #ff4bba;
+  border-right-color: #ffdd55;
+  animation: ui-spinner-rotate 0.9s linear infinite;
+}
+
+@keyframes ui-spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ui-error-modal {
+  width: min(420px, 95vw);
+  border-radius: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: linear-gradient(145deg, #1d1d1d, #131313);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.62);
+  padding: 1rem 1.15rem;
+}
+
+.ui-error-modal h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.ui-error-modal p {
+  margin: 0.6rem 0 0;
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+.ui-error-actions {
+  margin-top: 0.85rem;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ui-error-actions button {
+  margin: 0;
+  min-width: 108px;
+}

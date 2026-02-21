@@ -40,6 +40,25 @@
   let playRequestedExplicitly = false;
   let isPlayStarting = false;
   let fallbackDirectUrl: string | null = null;
+  let isPriming = false;
+  let primePromise: Promise<number | null> | null = null;
+  let primeRunId = 0;
+  let playStartWatchdogId: number | null = null;
+  let lastPlayStartPosition = 0;
+  let suppressPauseEventUntilMs = 0;
+  let lastWatchdogStage: 0 | 1 | 2 = 0;
+  let firstPlayGraceConsumedAttemptId: number | null = null;
+  let stage0MetadataGateConsumedAttemptId: number | null = null;
+  let hasPlaybackProgress = false;
+  let warmupRunId = 0;
+  let isCurrentTrackWarming = false;
+  let isCurrentTrackWarmReady = false;
+  let currentTrackWarmKey: string | null = null;
+  const PRIME_TIMEOUT_MS = 300;
+  const STALL_CHECK_MS = 650;
+  const FIRST_PLAY_EXTRA_GRACE_MS = 900;
+  const STAGE0_METADATA_GATE_MS = 300;
+  const WARMUP_METADATA_TIMEOUT_MS = 2000;
 
   // --- GPIO / WebSocket ---
   let ws: WebSocket | null = null;
@@ -104,6 +123,12 @@
   const currentTrack = (): Track | null =>
     tracks.length > 0 ? tracks[currentIndex] : null;
 
+  const currentWarmupKey = (): string | null => {
+    const track = currentTrack();
+    if (!track) return null;
+    return `${preloadRunId}:${currentIndex}:${track.name}`;
+  };
+
   const nextTrackIndex = (index: number): number =>
     tracks.length === 0 ? 0 : (index + 1) % tracks.length;
 
@@ -153,6 +178,29 @@
     return currentTrack()?.ramUrl ?? undefined;
   }
 
+  function ensureAudioSourceForCurrentTrack(): boolean {
+    if (!audioElement) return false;
+    const track = currentTrack();
+    if (!track?.ramUrl) return false;
+
+    if (audioElement.src !== track.ramUrl) {
+      audioElement.src = track.ramUrl;
+    }
+    return true;
+  }
+
+  function hasBufferedAudio(): boolean {
+    if (!audioElement) return false;
+    try {
+      const buffered = audioElement.buffered;
+      if (!buffered || buffered.length === 0) return false;
+      const end = buffered.end(buffered.length - 1);
+      return Number.isFinite(end) && end > 0;
+    } catch (_err) {
+      return false;
+    }
+  }
+
   function clearFallbackDirectUrl(): void {
     if (fallbackDirectUrl) {
       URL.revokeObjectURL(fallbackDirectUrl);
@@ -168,6 +216,437 @@
       track.ramUrl = null;
       track.preloaded = false;
     }
+  }
+
+  function clearPlayStartWatchdog(): void {
+    if (playStartWatchdogId !== null) {
+      window.clearTimeout(playStartWatchdogId);
+      playStartWatchdogId = null;
+    }
+  }
+
+  async function createTrackObjectUrl(
+    fileHandle: FileSystemFileHandle,
+  ): Promise<string> {
+    const file = await fileHandle.getFile();
+    const mime = file.type.trim();
+    if (mime) {
+      return URL.createObjectURL(file);
+    }
+
+    // Some File System Access handles report empty MIME for WAV files.
+    const buffer = await file.arrayBuffer();
+    const blob = new Blob([buffer], { type: "audio/wav" });
+    return URL.createObjectURL(blob);
+  }
+
+  function resetPlaybackForTrackTransition(options?: {
+    clearSource?: boolean;
+  }): void {
+    cancelPendingPlayAttempt();
+    clearPlayStartWatchdog();
+    primeRunId += 1;
+    warmupRunId += 1;
+    isPlaying = false;
+    hasPlaybackProgress = false;
+    firstPlayGraceConsumedAttemptId = null;
+    stage0MetadataGateConsumedAttemptId = null;
+    isCurrentTrackWarming = false;
+    isCurrentTrackWarmReady = false;
+    currentTrackWarmKey = null;
+    currentTime = 0;
+    duration = 0;
+    playError = null;
+    clearFallbackDirectUrl();
+
+    if (!audioElement) return;
+    audioElement.pause();
+    if (options?.clearSource) {
+      audioElement.removeAttribute("src");
+    }
+    audioElement.load();
+    audioElement.volume = volume;
+  }
+
+  async function primeCurrentTrack(): Promise<number | null> {
+    if (!audioElement || tracks.length === 0) {
+      wsLog("warn", "Prime übersprungen: Kein Audioelement/keine Tracks");
+      return null;
+    }
+
+    if (primePromise) return primePromise;
+    if (!audioElement.paused) {
+      wsLog("info", "Prime übersprungen: Bereits in Wiedergabe");
+      return null;
+    }
+
+    const track = currentTrack();
+    if (!track) return null;
+    const runId = primeRunId;
+
+    primePromise = (async () => {
+      const start = performance.now();
+      const trackName = track.name ?? "unbekannt";
+      wsLog("info", "Prime gestartet", { track: trackName });
+      let previousVolume: number | null = null;
+      let previousMuted: boolean | null = null;
+      let previousTime: number | null = null;
+
+      try {
+        isPriming = true;
+        previousVolume = audioElement.volume;
+        previousMuted = audioElement.muted;
+        previousTime = Number.isFinite(audioElement.currentTime)
+          ? audioElement.currentTime
+          : 0;
+
+        audioElement.preload = "auto";
+        if (audioElement.readyState < 3 || !hasBufferedAudio()) {
+          audioElement.load();
+        }
+
+        audioElement.muted = true;
+        audioElement.volume = 0;
+        const playPromise = audioElement.play();
+        if (playPromise) {
+          const guardedPlayPromise = playPromise.catch((_err) => {
+            // Expected when priming gets interrupted by pause/track changes.
+          });
+          const timeoutPromise = new Promise<void>((resolve) => {
+            window.setTimeout(resolve, PRIME_TIMEOUT_MS);
+          });
+          await Promise.race([guardedPlayPromise, timeoutPromise]);
+          if (runId !== primeRunId) {
+            wsLog("info", "Prime invalidated by track/dir change", {
+              track: trackName,
+            });
+            return performance.now();
+          }
+          if (audioElement.paused) {
+            wsLog("warn", "Prime timeout reached", {
+              track: trackName,
+              timeoutMs: PRIME_TIMEOUT_MS,
+            });
+          }
+        }
+        // Always call pause once to abort any pending play() from priming.
+        suppressPauseEventUntilMs = performance.now() + 1000;
+        audioElement.pause();
+      } catch (err) {
+        wsLog("warn", "Prime fehlgeschlagen", err);
+      } finally {
+        if (audioElement) {
+          if (runId !== primeRunId) {
+            wsLog("info", "Prime invalidated by track/dir change", {
+              track: trackName,
+            });
+            isPriming = false;
+            primePromise = null;
+            return performance.now();
+          }
+          try {
+            audioElement.muted = previousMuted ?? false;
+            const restoreVolume =
+              previousVolume !== null && Number.isFinite(previousVolume)
+                ? previousVolume
+                : volume;
+            audioElement.volume = restoreVolume;
+            if (previousTime !== null && Number.isFinite(previousTime)) {
+              audioElement.currentTime = previousTime;
+            }
+          } catch (_restoreErr) {
+            // ignore restore failures; playback path handles actual errors
+          }
+        }
+        isPriming = false;
+        primePromise = null;
+        wsLog("info", "Prime beendet", {
+          track: trackName,
+          durationMs: (performance.now() - start).toFixed(1),
+        });
+      }
+
+      return performance.now();
+    })();
+
+    return primePromise;
+  }
+
+  async function warmupCurrentTrackForInstantPlay(runId: number): Promise<void> {
+    if (runId !== warmupRunId) return;
+    if (!audioElement || isPlaying || isPlayStarting) return;
+    const track = currentTrack();
+    if (!track?.ramUrl) return;
+
+    const key = currentWarmupKey();
+    if (!key) return;
+    if (isCurrentTrackWarmReady && currentTrackWarmKey === key) return;
+    if (isCurrentTrackWarming && currentTrackWarmKey === key) return;
+
+    isCurrentTrackWarming = true;
+    isCurrentTrackWarmReady = false;
+    currentTrackWarmKey = key;
+
+    wsLog("info", "Warmup gestartet", {
+      track: track.name,
+      key,
+    });
+
+    try {
+      if (!ensureAudioSourceForCurrentTrack()) {
+        wsLog("warn", "Warmup abgebrochen: Quelle nicht bereit", {
+          track: track.name,
+          key,
+        });
+        return;
+      }
+      audioElement.preload = "auto";
+      audioElement.load();
+
+      const metadataSignal = await new Promise<
+        "event" | "timeout" | "already-ready"
+      >((resolve) => {
+        if (!audioElement) {
+          resolve("timeout");
+          return;
+        }
+        if (audioElement.readyState >= 1) {
+          resolve("already-ready");
+          return;
+        }
+
+        let settled = false;
+        const settle = (signal: "event" | "timeout") => {
+          if (settled) return;
+          settled = true;
+          audioElement?.removeEventListener("loadedmetadata", onReady);
+          audioElement?.removeEventListener("canplay", onReady);
+          resolve(signal);
+        };
+        const onReady = () => settle("event");
+
+        audioElement.addEventListener("loadedmetadata", onReady, { once: true });
+        audioElement.addEventListener("canplay", onReady, { once: true });
+        window.setTimeout(() => settle("timeout"), WARMUP_METADATA_TIMEOUT_MS);
+      });
+
+      if (!audioElement) return;
+      if (runId !== warmupRunId || key !== currentTrackWarmKey) {
+        wsLog("info", "Warmup invalidated by track/dir change", { key });
+        return;
+      }
+
+      const metadataReady = audioElement.readyState >= 1;
+      if (!metadataReady) {
+        wsLog("warn", "Warmup metadata timeout", {
+          track: track.name,
+          key,
+          readyState: audioElement.readyState,
+          signal: metadataSignal,
+          timeoutMs: WARMUP_METADATA_TIMEOUT_MS,
+        });
+        return;
+      }
+
+      wsLog("info", "Warmup metadata ready", {
+        track: track.name,
+        readyState: audioElement.readyState,
+        signal: metadataSignal,
+      });
+
+      await primeCurrentTrack();
+      if (runId !== warmupRunId || key !== currentTrackWarmKey) {
+        wsLog("info", "Warmup invalidated by track/dir change", { key });
+        return;
+      }
+
+      if (audioElement.readyState < 1) {
+        wsLog("warn", "Warmup prime finished without metadata", {
+          track: track.name,
+          key,
+          readyState: audioElement.readyState,
+        });
+        return;
+      }
+
+      wsLog("info", "Warmup prime done", { track: track.name });
+      isCurrentTrackWarmReady = true;
+      wsLog("info", "Warmup ready for instant play", {
+        track: track.name,
+        key,
+      });
+    } catch (err) {
+      wsLog("warn", "Warmup fehlgeschlagen", err);
+    } finally {
+      if (runId === warmupRunId && key === currentTrackWarmKey) {
+        isCurrentTrackWarming = false;
+      }
+    }
+  }
+
+  function schedulePlayStartWatchdog(
+    source: "ui" | "gpio" | "other",
+    attemptId: number,
+    stage: 0 | 1 | 2,
+    delayMs = STALL_CHECK_MS,
+  ): void {
+    if (!audioElement) return;
+    clearPlayStartWatchdog();
+    lastWatchdogStage = stage;
+
+    lastPlayStartPosition = audioElement.currentTime;
+    playStartWatchdogId = window.setTimeout(() => {
+      void (async () => {
+        if (!audioElement) return;
+        if (attemptId !== playAttemptId) return;
+        if (!isPlaying || audioElement.paused || isPriming) return;
+
+        const nowPosition = audioElement.currentTime;
+        const delta = Math.abs(nowPosition - lastPlayStartPosition);
+        if (delta > 0.02) {
+          if (stage > 0) {
+            wsLog("info", "Playback stall recovery result", {
+              source,
+              result: "recovered",
+              stage,
+              delta: delta.toFixed(3),
+            });
+          }
+          return;
+        }
+
+        if (
+          stage === 0 &&
+          audioElement.readyState === 0 &&
+          !isCurrentTrackWarmReady &&
+          stage0MetadataGateConsumedAttemptId !== attemptId
+        ) {
+          stage0MetadataGateConsumedAttemptId = attemptId;
+          wsLog("info", "Stage0 metadata gate before stall", {
+            source,
+            track: currentTrack()?.name ?? "unbekannt",
+            attemptId,
+            gateMs: STAGE0_METADATA_GATE_MS,
+          });
+          audioElement.preload = "auto";
+          audioElement.load();
+          schedulePlayStartWatchdog(
+            source,
+            attemptId,
+            stage,
+            STAGE0_METADATA_GATE_MS,
+          );
+          return;
+        }
+
+        if (
+          stage === 0 &&
+          !hasPlaybackProgress &&
+          firstPlayGraceConsumedAttemptId !== attemptId
+        ) {
+          firstPlayGraceConsumedAttemptId = attemptId;
+          wsLog("info", "First-play grace before stall recovery", {
+            source,
+            track: currentTrack()?.name ?? "unbekannt",
+            attemptId,
+            extraMs: FIRST_PLAY_EXTRA_GRACE_MS,
+          });
+          schedulePlayStartWatchdog(
+            source,
+            attemptId,
+            stage,
+            FIRST_PLAY_EXTRA_GRACE_MS,
+          );
+          return;
+        }
+
+        wsLog("warn", "Playback stall detected", {
+          source,
+          stage,
+          positionBefore: lastPlayStartPosition.toFixed(3),
+          positionNow: nowPosition.toFixed(3),
+          readyState: audioElement.readyState,
+          networkState: audioElement.networkState,
+        });
+        await recoverFromPlaybackStall(source, stage);
+      })();
+    }, delayMs);
+  }
+
+  async function recoverFromPlaybackStall(
+    source: "ui" | "gpio" | "other",
+    stage: 0 | 1 | 2,
+  ): Promise<void> {
+    if (!audioElement) return;
+    const track = currentTrack();
+    if (!track) return;
+    clearPlayStartWatchdog();
+
+    if (stage >= 2) {
+      playError = "Playback stalled repeatedly after retries";
+      isPlayStarting = false;
+      isPlaying = false;
+      audioElement.muted = false;
+      audioElement.volume = volume;
+      wsLog("error", "Playback stall recovery failed", {
+        source,
+        track: track.name,
+        stage,
+        result: "failed",
+      });
+      return;
+    }
+
+    cancelPendingPlayAttempt();
+    if (!audioElement.paused) {
+      audioElement.pause();
+    }
+    audioElement.currentTime = 0;
+
+    try {
+      if (stage === 0) {
+        wsLog("warn", "Retry play from RAM URL", { track: track.name, stage });
+        if (track.ramUrl) {
+          audioElement.src = track.ramUrl;
+        }
+      } else {
+        wsLog("warn", "Retry play with direct URL fallback", {
+          track: track.name,
+          stage,
+        });
+        clearFallbackDirectUrl();
+        const fallbackUrl = await createTrackObjectUrl(track.fileHandle);
+        if (!audioElement) {
+          URL.revokeObjectURL(fallbackUrl);
+          return;
+        }
+        fallbackDirectUrl = fallbackUrl;
+        audioElement.src = fallbackDirectUrl;
+      }
+
+      audioElement.load();
+      await primeCurrentTrack();
+      audioElement.muted = false;
+      audioElement.volume = volume;
+    } catch (err) {
+      if (audioElement) {
+        audioElement.muted = false;
+        audioElement.volume = volume;
+      }
+      wsLog("error", "Playback stall recovery preparation failed", err);
+      return;
+    }
+
+    if (!audioElement) return;
+    const retryStartedAt = performance.now();
+    lastPlayTrigger = source;
+    lastPlayCallTs = retryStartedAt;
+    playRequestedExplicitly = true;
+    playError = null;
+    playAttemptId += 1;
+    const retryAttemptId = playAttemptId;
+    const nextStage: 1 | 2 = stage === 0 ? 1 : 2;
+    void tryPlayWithOptionalFallback(source, retryStartedAt, retryAttemptId, nextStage);
   }
 
   function rollingWindowIndices(centerIndex: number): Set<number> {
@@ -229,10 +708,13 @@
         const track = tracks[index];
         if (!track || (track.preloaded && track.ramUrl)) continue;
 
-        const file = await track.fileHandle.getFile();
         if (runId !== preloadRunId || preloadMode !== "rolling") return;
-
-        track.ramUrl = URL.createObjectURL(file);
+        const url = await createTrackObjectUrl(track.fileHandle);
+        if (runId !== preloadRunId || preloadMode !== "rolling") {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        track.ramUrl = url;
         track.preloaded = true;
       }
 
@@ -240,6 +722,15 @@
       pruneRamCacheToWindow(keep);
       setRollingProgress(centerIndex);
       tracks = [...tracks];
+      if (
+        audioElement &&
+        centerIndex === currentIndex &&
+        currentTrack()?.ramUrl &&
+        !isPlaying &&
+        !isPlayStarting
+      ) {
+        void warmupCurrentTrackForInstantPlay(warmupRunId);
+      }
     } catch (err) {
       if (runId !== preloadRunId) return;
       preloadError = `Rolling cache failed: ${describePlayError(err)}`;
@@ -284,13 +775,21 @@
           return;
         }
 
-        const file = await track.fileHandle.getFile();
-        track.ramUrl = URL.createObjectURL(file);
+        const url = await createTrackObjectUrl(track.fileHandle);
+        if (runId !== preloadRunId) {
+          URL.revokeObjectURL(url);
+          clearRamUrlsForTracks(trackList);
+          return;
+        }
+        track.ramUrl = url;
         track.preloaded = true;
         preloadProgressCount += 1;
 
         // Trigger reactivity for progress and per-track readiness.
         tracks = [...tracks];
+      }
+      if (runId === preloadRunId && audioElement && currentTrack()?.ramUrl) {
+        void warmupCurrentTrackForInstantPlay(warmupRunId);
       }
     } catch (err) {
       if (runId !== preloadRunId) {
@@ -332,16 +831,24 @@
     playAttemptId += 1;
     playRequestedExplicitly = false;
     isPlayStarting = false;
+    clearPlayStartWatchdog();
+    primeRunId += 1;
+    suppressPauseEventUntilMs = 0;
+    firstPlayGraceConsumedAttemptId = null;
+    stage0MetadataGateConsumedAttemptId = null;
   }
 
   async function tryPlayWithOptionalFallback(
     source: "ui" | "gpio" | "other",
     startedAt: number,
     attemptId: number,
+    watchdogStage: 0 | 1 | 2 = 0,
   ): Promise<void> {
     if (!audioElement || !currentTrack()) return;
 
     isPlayStarting = true;
+    audioElement.muted = false;
+    audioElement.volume = volume;
 
     try {
       const playPromise = audioElement.play();
@@ -352,6 +859,7 @@
 
       isPlayStarting = false;
       playError = null;
+      playRequestedExplicitly = false;
       const resolvedAt = performance.now();
       wsLog("info", "Play-Promise erfuellt", {
         source,
@@ -360,6 +868,7 @@
         sinceWsMs:
           lastWsDownTs !== null ? (resolvedAt - lastWsDownTs).toFixed(1) : undefined,
       });
+      schedulePlayStartWatchdog(source, attemptId, watchdogStage);
       return;
     } catch (err) {
       if (attemptId !== playAttemptId) return;
@@ -367,6 +876,10 @@
 
       if (err instanceof DOMException && err.name === "AbortError") {
         playError = null;
+        if (audioElement) {
+          audioElement.muted = false;
+          audioElement.volume = volume;
+        }
         wsLog("info", "Play-Promise abgebrochen (erwartet)", {
           source,
           track: currentTrack()?.name ?? "unbekannt",
@@ -387,14 +900,21 @@
         if (!track || !audioElement) {
           playError = `Playback failed: ${initialErrorText}`;
           playRequestedExplicitly = false;
+          if (audioElement) {
+            audioElement.muted = false;
+            audioElement.volume = volume;
+          }
           return;
         }
 
         clearFallbackDirectUrl();
-        const file = await track.fileHandle.getFile();
         if (attemptId !== playAttemptId || !audioElement) return;
-
-        fallbackDirectUrl = URL.createObjectURL(file);
+        const url = await createTrackObjectUrl(track.fileHandle);
+        if (attemptId !== playAttemptId || !audioElement) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        fallbackDirectUrl = url;
         audioElement.src = fallbackDirectUrl;
         audioElement.load();
 
@@ -407,10 +927,12 @@
 
         isPlayStarting = false;
         playError = null;
+        playRequestedExplicitly = false;
         wsLog("info", "Fallback-Play erfolgreich", {
           source,
           track: track.name,
         });
+        schedulePlayStartWatchdog(source, attemptId, 2);
       } catch (fallbackErr) {
         if (attemptId !== playAttemptId) return;
         isPlayStarting = false;
@@ -419,6 +941,10 @@
           fallbackErr.name === "AbortError"
         ) {
           playError = null;
+          if (audioElement) {
+            audioElement.muted = false;
+            audioElement.volume = volume;
+          }
           wsLog("info", "Fallback-Play abgebrochen (erwartet)", {
             source,
             track: currentTrack()?.name ?? "unbekannt",
@@ -428,6 +954,10 @@
         const fallbackErrorText = describePlayError(fallbackErr);
         playError = `Playback failed: ${initialErrorText} | fallback failed: ${fallbackErrorText}`;
         playRequestedExplicitly = false;
+        if (audioElement) {
+          audioElement.muted = false;
+          audioElement.volume = volume;
+        }
         wsLog("error", "Fallback-Play fehlgeschlagen", fallbackErr);
       }
     }
@@ -468,7 +998,48 @@
       playRequestedExplicitly = true;
       playAttemptId += 1;
       const attemptId = playAttemptId;
-      void tryPlayWithOptionalFallback(source, now, attemptId);
+      const sourceReady = ensureAudioSourceForCurrentTrack();
+      if (!sourceReady) {
+        wsLog("warn", "Play angefordert, aber Quelle nicht gesetzt", {
+          source,
+          track: currentTrack()?.name ?? "unbekannt",
+        });
+      }
+      const warmKey = currentWarmupKey();
+      const canSkipPrime =
+        sourceReady &&
+        Boolean(warmKey) &&
+        isCurrentTrackWarmReady &&
+        currentTrackWarmKey === warmKey;
+      void (async () => {
+        if (canSkipPrime) {
+          wsLog("info", "Warmup ready: skip prime for instant play", {
+            source,
+            track: currentTrack()?.name ?? "unbekannt",
+          });
+          if (attemptId !== playAttemptId || !audioElement) return;
+          audioElement.muted = false;
+          audioElement.volume = volume;
+          void tryPlayWithOptionalFallback(source, now, attemptId, 0);
+          return;
+        }
+        const primeStartedAt = performance.now();
+        await primeCurrentTrack();
+        if (attemptId !== playAttemptId) return;
+        if (!audioElement) return;
+        const primeElapsedMs = performance.now() - primeStartedAt;
+        if (primeElapsedMs >= PRIME_TIMEOUT_MS) {
+          wsLog("info", "Play continues after prime timeout", {
+            source,
+            track: currentTrack()?.name ?? "unbekannt",
+            elapsedMs: primeElapsedMs.toFixed(1),
+            timeoutMs: PRIME_TIMEOUT_MS,
+          });
+        }
+        audioElement.muted = false;
+        audioElement.volume = volume;
+        void tryPlayWithOptionalFallback(source, now, attemptId, 0);
+      })();
     } else {
       wsLog("info", isPlayStarting ? "Play-Start abgebrochen" : "Pause angefordert", {
         source,
@@ -495,16 +1066,17 @@
   function onTimeUpdate(): void {
     if (!audioElement) return;
     currentTime = audioElement.currentTime ?? 0;
+    if (currentTime > 0.02) {
+      hasPlaybackProgress = true;
+    }
   }
 
   function handlePlay(): void {
     if (!audioElement) return;
-    if (!playRequestedExplicitly) {
-      isPlayStarting = false;
-      wsLog("warn", "Unerwartetes Play ohne expliziten Trigger - stoppe", {
+    if (isPriming) {
+      wsLog("info", "Playback-Event während Prime (stumm)", {
         track: currentTrack()?.name ?? "unbekannt",
       });
-      audioElement.pause();
       return;
     }
     playRequestedExplicitly = false;
@@ -525,20 +1097,64 @@
       position: audioElement.currentTime.toFixed(3),
       readyState: audioElement.readyState,
     });
+    if (playStartWatchdogId === null) {
+      schedulePlayStartWatchdog(
+        lastPlayTrigger ?? "other",
+        playAttemptId,
+        lastWatchdogStage,
+      );
+    }
   }
 
   function handlePause(): void {
     if (!audioElement) return;
+    if (isPriming) {
+      wsLog("info", "Pause-Event während Prime (stumm)", {
+        track: currentTrack()?.name ?? "unbekannt",
+      });
+      return;
+    }
+    const now = performance.now();
+    if (isPlayStarting && now <= suppressPauseEventUntilMs) {
+      wsLog("info", "Prime-induziertes Pause-Event ignoriert", {
+        track: currentTrack()?.name ?? "unbekannt",
+        dtMs: (suppressPauseEventUntilMs - now).toFixed(1),
+      });
+      return;
+    }
     playRequestedExplicitly = false;
     isPlayStarting = false;
+    clearPlayStartWatchdog();
     const trackName = currentTrack()?.name ?? "unbekannt";
     isPlaying = false;
-    const now = performance.now();
     wsLog("info", "Playback pausiert", {
       track: trackName,
       source: lastPlayTrigger ?? "unbekannt",
       timestampMs: now.toFixed(1),
       position: audioElement.currentTime.toFixed(3),
+    });
+  }
+
+  function handleAudioError(): void {
+    if (!audioElement) return;
+    const trackName = currentTrack()?.name ?? "unbekannt";
+    const code = audioElement.error?.code ?? null;
+    playRequestedExplicitly = false;
+    isPlayStarting = false;
+    clearPlayStartWatchdog();
+    isPlaying = false;
+    audioElement.muted = false;
+    audioElement.volume = volume;
+    playError =
+      code === null
+        ? "Playback failed: unknown audio element error"
+        : `Playback failed: audio element error code ${code}`;
+    wsLog("error", "Audio-Element Fehler", {
+      track: trackName,
+      code,
+      readyState: audioElement.readyState,
+      networkState: audioElement.networkState,
+      currentSrc: audioElement.currentSrc,
     });
   }
 
@@ -570,9 +1186,8 @@
 
       isLoadingDir = true;
       preloadRunId += 1;
-      cancelPendingPlayAttempt();
+      resetPlaybackForTrackTransition({ clearSource: true });
       clearRamUrlsForTracks(tracks);
-      clearFallbackDirectUrl();
 
       // Reset State
       tracks = [];
@@ -580,11 +1195,7 @@
       directories = [];
       selectedDirPath = null;
       currentIndex = 0;
-      currentTime = 0;
-      duration = 0;
-      isPlaying = false;
       preloadError = null;
-      playError = null;
       preloadMode = "full";
       preloadProgressCount = 0;
       preloadTotalCount = 0;
@@ -775,11 +1386,8 @@
     if (!dir) return;
 
     preloadRunId += 1;
-    cancelPendingPlayAttempt();
     const runId = preloadRunId;
-    playError = null;
     clearRamUrlsForTracks(tracks);
-    clearFallbackDirectUrl();
 
     selectedDirPath = dir.path;
 
@@ -792,17 +1400,10 @@
     preloadError = null;
     preloadProgressCount = 0;
     preloadTotalCount = tracks.length;
+    resetPlaybackForTrackTransition({ clearSource: true });
 
     // Playlist-Scroll nach oben, wenn Ordner gewechselt wird
     void scrollPlaylistToTop();
-
-    if (audioElement) {
-      audioElement.pause();
-      isPlaying = false;
-      audioElement.removeAttribute("src");
-      audioElement.load();
-      audioElement.volume = volume;
-    }
 
     void preloadDirectoryTracksToRam(tracks, runId);
   }
@@ -814,37 +1415,14 @@
       track: tracks[index]?.name ?? `Index ${index}`,
     });
 
-    if (!audioElement) {
-      currentIndex = index;
-      isPlaying = false;
-      currentTime = 0;
-      duration = 0;
-      if (preloadMode === "rolling") {
-        setRollingProgress(currentIndex);
-        void ensureRollingWindowLoaded(currentIndex, preloadRunId);
-      }
-      return;
-    }
-
-    // Immer stoppen - kein automatisches Weiterspielen
-    audioElement.pause();
-    isPlaying = false;
-    cancelPendingPlayAttempt();
-    playError = null;
-    clearFallbackDirectUrl();
-
     currentIndex = index;
-    currentTime = 0;
-    duration = 0;
+    resetPlaybackForTrackTransition();
 
-    // Neuen Track laden, aber NICHT autoplayen
-    if (audioElement && currentTrack()) {
-      audioElement.volume = volume;
-      audioElement.load();
-    }
     if (preloadMode === "rolling") {
       setRollingProgress(currentIndex);
       void ensureRollingWindowLoaded(currentIndex, preloadRunId);
+    } else {
+      void warmupCurrentTrackForInstantPlay(warmupRunId);
     }
   }
 
@@ -879,6 +1457,7 @@
   function onEnded(): void {
     playRequestedExplicitly = false;
     isPlayStarting = false;
+    clearPlayStartWatchdog();
     const trackName = currentTrack()?.name ?? "unbekannt";
     const position =
       audioElement && Number.isFinite(audioElement.currentTime)
@@ -973,23 +1552,10 @@
     }
 
     const trackName = currentTrack()?.name ?? "unbekannt";
-    const wasPaused = audioElement.paused;
-
-    if (!wasPaused) {
-      lastPlayTrigger = "gpio";
-      lastPlayCallTs = receivedAt;
-      cancelPendingPlayAttempt();
-      wsLog("info", "GPIO Pause angefordert", {
-        track: trackName,
-        position: Number.isFinite(audioElement.currentTime)
-          ? audioElement.currentTime.toFixed(3)
-          : "n/a",
-      });
-      audioElement.pause();
-      return;
-    }
-
-    wsLog("info", "GPIO Play angefordert (RAM bereit)", { track: trackName });
+    wsLog("info", "GPIO Toggle angefordert (RAM bereit)", {
+      track: trackName,
+      action: !isPlaying && !isPlayStarting ? "play" : "pause",
+    });
     togglePlay("gpio");
   };
 
@@ -1086,10 +1652,8 @@
     // --- GPIO / WebSocket: Verbindung aufbauen ---
     updateGpioStatus("connecting");
 
-    const wsPort = 8080;
     const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
-
-    const wsUrl = `${wsProtocol}://${window.location.hostname}:${wsPort}`;
+    const wsUrl = `${wsProtocol}://${window.location.host}/ws`;
 
     wsLog("info", `Verbinde zu ${wsUrl}`);
     ws = new WebSocket(wsUrl);
@@ -1117,7 +1681,9 @@
 
     return () => {
       preloadRunId += 1;
+      warmupRunId += 1;
       cancelPendingPlayAttempt();
+      clearPlayStartWatchdog();
       clearRamUrlsForTracks(tracks);
       clearFallbackDirectUrl();
       window.removeEventListener("resize", handleResize);
@@ -1170,6 +1736,7 @@
         on:timeupdate={onTimeUpdate}
         on:play={handlePlay}
         on:pause={handlePause}
+        on:error={handleAudioError}
         on:ended={onEnded}
       ></audio>
 
